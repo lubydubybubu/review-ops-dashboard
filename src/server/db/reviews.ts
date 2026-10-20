@@ -1,4 +1,4 @@
-import { kstInstant, kstTimeOf, type IsoDate, type IsoInstant } from '@/lib/domain/dates';
+import { kstDateTimeLocal, kstInstant, kstTimeOf, type IsoDate, type IsoInstant } from '@/lib/domain/dates';
 import type {
   CalendarField,
   CategoryKey,
@@ -53,6 +53,8 @@ export interface ReviewDetail extends ReviewListItem {
   notesMd: string;
   templateId: number | null;
   createdAt: IsoInstant;
+  /** row revision (bumped by a trigger on every update); a form save is checked against it */
+  version: number;
 }
 
 const LIST_COLUMNS = `
@@ -64,11 +66,16 @@ const LIST_COLUMNS = `
   r.publish_planned_on as "publishPlannedOn", r.embargo_until as "embargoUntil",
   r.published_at as "publishedAt", r.archived_at as "archivedAt", r.updated_at as "updatedAt"`;
 
-const FROM = `
-  from reviews r
+const DETAIL_COLUMNS = `${LIST_COLUMNS}, r.published_url as "publishedUrl", r.notes_md as "notesMd",
+  r.template_id as "templateId", r.created_at as "createdAt", r.version`;
+
+/** Joins for `r` (a reviews row; also the RETURNING set of the form save). */
+const JOINS = `
   join workflow_stages s on s.id = r.stage_id
   join stage_categories c on c.key = s.category_key
   left join brands b on b.id = r.brand_id`;
+
+const FROM = `from reviews r ${JOINS}`;
 
 // ---------------------------------------------------------------- create
 
@@ -131,13 +138,7 @@ export async function createReview(db: Database, input: ReviewCreateInput): Prom
 // ---------------------------------------------------------------- read
 
 export async function getReview(db: Queryable, id: number): Promise<ReviewDetail | undefined> {
-  const { rows } = await db.query<ReviewDetail>(
-    `select ${LIST_COLUMNS}, r.published_url as "publishedUrl", r.notes_md as "notesMd",
-            r.template_id as "templateId", r.created_at as "createdAt"
-     ${FROM}
-     where r.id = $1`,
-    [id],
-  );
+  const { rows } = await db.query<ReviewDetail>(`select ${DETAIL_COLUMNS} ${FROM} where r.id = $1`, [id]);
   return rows[0];
 }
 
@@ -271,29 +272,38 @@ export async function getStageHistory(db: Queryable, reviewId: number): Promise<
 
 // ---------------------------------------------------------------- update
 
-export type ReviewUpdateOutcome = { ok: true; updatedAt: IsoInstant } | { ok: false; error: StageMoveError | 'stale' };
+export type ReviewUpdateOutcome = { ok: true; review: ReviewDetail } | { ok: false; error: StageMoveError | 'stale' };
 
 /**
  * Save the detail form. A stage change here is a stage move like any other.
- * Optimistic concurrency: with `expectedUpdatedAt` (the `updatedAt` the form was loaded with) the save is
- * refused as `stale` when the row changed since — another tab, a calendar drag, a board move. Compared at
- * millisecond precision, because that is what the client holds (timestamptz → JS Date ISO string).
+ * Optimistic concurrency: with `expectedVersion` (the `version` the form was loaded with) the save is
+ * refused as `stale` when the row changed since — another tab, a calendar drag, a board move. The UPDATE
+ * itself carries the check (`where … and version = $n`); zero rows means stale and nothing is written.
+ * Returns the saved row as stored (server rules applied, new version) for the caller's next form.
  */
 export async function updateReview(
   db: Database,
   id: number,
   input: ReviewUpdateInput,
   now = new Date(),
-  expectedUpdatedAt?: IsoInstant,
+  expectedVersion?: number,
 ): Promise<ReviewUpdateOutcome> {
+  const stale = { ok: false as const, error: 'stale' as const };
   return withTransaction(db, async (tx) => {
+    // The row lock is for the stage rules below (they read the current stage / publish time).
     const current = await lockReview(tx, id);
-    if (expectedUpdatedAt !== undefined && Date.parse(current.updatedAt) !== Date.parse(expectedUpdatedAt)) {
-      return { ok: false as const, error: 'stale' as const };
-    }
-    let publishedAt = input.publishedAtLocal
-      ? kstInstant(input.publishedAtLocal.slice(0, 10), input.publishedAtLocal.slice(11, 16))
-      : null;
+    // Checked early too, so a stale form gets `stale` rather than a stage error about a row it never saw.
+    if (expectedVersion !== undefined && current.version !== expectedVersion) return stale;
+
+    // The form holds minutes only: while it shows the stored instant's minute, keep the stored (precise)
+    // instant; reconstruct it only when the owner changed or cleared it.
+    const local = input.publishedAtLocal?.slice(0, 16) ?? null;
+    let publishedAt =
+      current.publishedAt && local === kstDateTimeLocal(current.publishedAt)
+        ? current.publishedAt
+        : local
+          ? kstInstant(local.slice(0, 10), local.slice(11, 16))
+          : null;
 
     if (input.stageId !== current.stageId) {
       const result = planStageMove({ ...current, publishedAt }, await getStage(tx, input.stageId), now);
@@ -306,14 +316,17 @@ export async function updateReview(
     const startsAt = input.shootOn && input.shootStartTime ? kstInstant(input.shootOn, input.shootStartTime) : null;
     const endsAt = input.shootOn && input.shootEndTime ? kstInstant(input.shootOn, input.shootEndTime) : null;
 
-    const { rows } = await tx.query<{ updatedAt: IsoInstant }>(
-      `update reviews set
-          product_name = $2, title = $3, brand_id = $4, source_type = $5, stage_id = $6,
-          priority = $7, channels = $8, received_on = $9, shoot_on = $10, shoot_starts_at = $11,
-          shoot_ends_at = $12, write_due_on = $13, publish_planned_on = $14, embargo_until = $15,
-          published_at = $16, published_url = $17, notes_md = $18
-        where id = $1
-        returning updated_at as "updatedAt"`,
+    const { rows } = await tx.query<ReviewDetail>(
+      `with r as (
+         update reviews set
+           product_name = $2, title = $3, brand_id = $4, source_type = $5, stage_id = $6,
+           priority = $7, channels = $8, received_on = $9, shoot_on = $10, shoot_starts_at = $11,
+           shoot_ends_at = $12, write_due_on = $13, publish_planned_on = $14, embargo_until = $15,
+           published_at = $16, published_url = $17, notes_md = $18
+         where id = $1 and ($19::integer is null or version = $19)
+         returning *
+       )
+       select ${DETAIL_COLUMNS} from r ${JOINS}`,
       [
         id,
         input.productName,
@@ -333,9 +346,10 @@ export async function updateReview(
         publishedAt,
         input.publishedUrl,
         input.notesMd,
+        expectedVersion ?? null,
       ],
     );
-    return { ok: true as const, updatedAt: rows[0]!.updatedAt };
+    return rows[0] ? { ok: true as const, review: rows[0] } : stale;
   });
 }
 
@@ -346,14 +360,14 @@ interface LockedReview {
   shootOn: IsoDate | null;
   shootStartsAt: IsoInstant | null;
   shootEndsAt: IsoInstant | null;
-  updatedAt: IsoInstant;
+  version: number;
 }
 
 async function lockReview(tx: Queryable, id: number): Promise<LockedReview> {
   const { rows } = await tx.query<LockedReview>(
     `select stage_id as "stageId", published_at as "publishedAt", archived_at as "archivedAt",
             shoot_on as "shootOn", shoot_starts_at as "shootStartsAt", shoot_ends_at as "shootEndsAt",
-            updated_at as "updatedAt"
+            version
        from reviews where id = $1 for update`,
     [id],
   );

@@ -8,7 +8,7 @@ import { resetData, stageIdsByName, useAdminPool, useAppPool } from './helpers';
 /** Full row minus bookkeeping, to prove a drag touched exactly one field. */
 async function snapshot(db: ReturnType<typeof useAppPool>, id: number) {
   const { rows } = await db.query('select * from reviews where id = $1', [id]);
-  const { updated_at: _updatedAt, ...rest } = rows[0];
+  const { updated_at: _updatedAt, version: _version, ...rest } = rows[0];
   return rest as Record<string, unknown>;
 }
 

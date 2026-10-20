@@ -50,7 +50,7 @@ export default async function ReviewPage({ params }: Props) {
       </nav>
 
       <div className="grid gap-10 lg:grid-cols-[minmax(0,1fr)_18rem]">
-        <ReviewEditor key={review.updatedAt} review={review} stages={stages} brands={brands} today={todayInSeoul()} />
+        <ReviewEditor key={review.version} review={review} stages={stages} brands={brands} today={todayInSeoul()} />
 
         <aside className="flex flex-col gap-8">
           <Checklist reviewId={review.id} items={checklist} readOnly={review.archivedAt !== null} />

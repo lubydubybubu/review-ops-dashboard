@@ -1,5 +1,5 @@
 import type { ReviewDetail } from '@/server/db/reviews';
-import { kstDateOf, kstTimeOf } from './domain/dates';
+import { kstDateTimeLocal, kstTimeOf } from './domain/dates';
 import type { Channel } from './domain/review';
 
 /**
@@ -43,7 +43,8 @@ export function toReviewForm(r: ReviewDetail): ReviewFormState {
     writeDueOn: r.writeDueOn ?? '',
     publishPlannedOn: r.publishPlannedOn ?? '',
     embargoUntil: r.embargoUntil ?? '',
-    publishedAtLocal: r.publishedAt ? `${kstDateOf(r.publishedAt)}T${kstTimeOf(r.publishedAt)}` : '',
+    // minutes only; the save keeps the stored (more precise) instant while this value is unchanged
+    publishedAtLocal: r.publishedAt ? kstDateTimeLocal(r.publishedAt) : '',
     publishedUrl: r.publishedUrl ?? '',
     notesMd: r.notesMd,
   };

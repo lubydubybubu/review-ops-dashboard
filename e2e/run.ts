@@ -28,7 +28,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import pg from 'pg';
-import { chromium, type BrowserContext, type Locator, type Page } from 'playwright-core';
+import { chromium, type BrowserContext, type Locator, type Page, type Request as PwRequest } from 'playwright-core';
 import { addDays, todayInSeoul } from '../src/lib/domain/dates';
 import { hashPassword } from '../src/server/auth/password';
 import { createPool } from '../src/server/db/client';
@@ -835,6 +835,89 @@ async function main() {
       }
       await page.emulateMedia({ colorScheme: 'light' });
       await page.setViewportSize({ width: 1440, height: 900 });
+    });
+
+    // Regressions from the independent peek review: checklist changes must not touch the form or its version.
+    async function createChecklistReview(name: string) {
+      const { rows: todo } = await db.query(
+        `select id from workflow_stages where entity_type = 'review' and archived_at is null and category_key = 'todo' order by sort limit 1`,
+      );
+      const { rows } = await db.query(
+        `insert into reviews (product_name, title, stage_id, publish_planned_on, notes_md, channels)
+         values ($1, 'Original title', $2, $3, 'Original hidden notes', array['blog']) returning id`,
+        [name, todo[0].id, today],
+      );
+      const id = rows[0].id as number;
+      await db.query(`insert into review_checklist_items (review_id, title, sort) values ($1, 'E2E 항목', 1)`, [id]);
+      await page.goto(`/calendar?date=${today}&view=month&peek=${id}`);
+      await peek.getByLabel('제품명', { exact: true }).waitFor();
+      return id;
+    }
+    /** Run `act`, then wait until no server action has been in flight for a moment (its result is applied). */
+    async function actionsSettled(act: () => Promise<unknown>, quietMs = 300) {
+      let inflight = 0;
+      let last = Date.now();
+      const track = (delta: number) => (r: PwRequest) => {
+        if (!r.headers()['next-action']) return;
+        inflight += delta;
+        last = Date.now();
+      };
+      const started = track(1);
+      const ended = track(-1);
+      page.on('request', started);
+      page.on('requestfinished', ended);
+      page.on('requestfailed', ended);
+      try {
+        await act();
+        while (inflight > 0 || Date.now() - last < quietMs) await page.waitForTimeout(50);
+      } finally {
+        page.off('request', started);
+        page.off('requestfinished', ended);
+        page.off('requestfailed', ended);
+      }
+    }
+    const reviewFields = async (id: number) =>
+      (await db.query('select title, notes_md, channels, priority from reviews where id = $1', [id])).rows[0];
+    const itemDone = async (id: number) =>
+      (await db.query('select done_at is not null as done from review_checklist_items where review_id = $1', [id])).rows[0].done as boolean;
+
+    await test('peek: after a checklist toggle an old form cannot overwrite another tab’s committed edit', page, async () => {
+      const id = await createChecklistReview('E2E 체크리스트 버전');
+      await peek.getByLabel('우선순위').selectOption('high');
+      await db.query(
+        `update reviews set title = 'New title in another tab', notes_md = 'New hidden notes in another tab', channels = array['youtube'] where id = $1`,
+        [id],
+      );
+      await actionsSettled(() => peek.getByRole('checkbox').first().click());
+      assertEqual(await itemDone(id), true, 'checklist toggle saved');
+      await actionsSettled(() => peek.getByRole('button', { name: '저장', exact: true }).click());
+      const row = await reviewFields(id);
+      assertEqual(
+        [row.title, row.notes_md, row.channels, row.priority],
+        ['New title in another tab', 'New hidden notes in another tab', ['youtube'], 'normal'],
+        'stored row after the old form was submitted',
+      );
+      await peek.getByRole('alert').filter({ hasText: '다른 곳에서 수정되었습니다. 새로고침 후 다시 시도하세요.' }).waitFor();
+      await peek.getByRole('button', { name: '닫기' }).first().click();
+      await peek.getByRole('alertdialog').getByRole('button', { name: '버리고 닫기' }).click();
+      await peek.waitFor({ state: 'hidden' });
+    });
+
+    await test('peek: a checklist toggle keeps the add-item draft; main save and toggles keep each other', page, async () => {
+      const id = await createChecklistReview('E2E 체크리스트 독립');
+      await peek.getByLabel('작업 제목').fill('Panel title');
+      await peek.getByLabel('체크리스트 항목 추가').fill('작성 중인 항목');
+      await actionsSettled(() => peek.getByRole('checkbox').first().click());
+      assertEqual(await peek.getByLabel('체크리스트 항목 추가').inputValue(), '작성 중인 항목', 'add-item draft after a toggle');
+      assertEqual(await peek.getByLabel('작업 제목').inputValue(), 'Panel title', 'form edit after a toggle');
+      await actionsSettled(() => peek.getByRole('button', { name: '저장', exact: true }).click());
+      await toast(page, '저장했습니다.').waitFor();
+      assertEqual([(await reviewFields(id)).title, await itemDone(id)], ['Panel title', true], 'after the main save');
+      await actionsSettled(() => peek.getByRole('checkbox').first().click());
+      assertEqual([(await reviewFields(id)).title, await itemDone(id)], ['Panel title', false], 'after a second toggle');
+      assertEqual(await peek.getByText('저장하지 않은 변경').count(), 0, 'form dirty after save + toggle');
+      await peek.getByLabel('체크리스트 항목 추가').fill('');
+      await closePeek();
     });
 
     await test('calendar: week start setting re-renders without reload and persists', page, async () => {

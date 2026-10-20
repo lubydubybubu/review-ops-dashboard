@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import type pg from 'pg';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { listCalendarChips } from '../../src/server/db/calendar';
 import {
@@ -178,38 +181,37 @@ describe('reviews CRUD', () => {
   });
 });
 
-describe('review save: optimistic concurrency (updated_at check)', () => {
+describe('review save: optimistic concurrency (version check)', () => {
   const db = useAppPool();
   const admin = useAdminPool();
   beforeEach(() => resetData(admin));
 
-  /** What the peek / detail form does: load, change, send the whole form with the loaded updatedAt. */
-  async function saveLoaded(id: number, change: Record<string, unknown>, expected?: string) {
+  /** What the peek / detail form does: load, change, send the whole form with the loaded version. */
+  async function saveLoaded(id: number, change: Record<string, unknown>, expected?: number) {
     const loaded = (await getReview(db, id))!;
     const input = reviewUpdateSchema.parse({ ...toReviewForm(loaded), ...change });
-    return updateReview(db, id, input, new Date(), expected ?? loaded.updatedAt);
+    return updateReview(db, id, input, new Date(), expected ?? loaded.version);
   }
 
-  it('a save with the updatedAt it was loaded with goes through and returns the new updatedAt', async () => {
+  it('a save with the version it was loaded with goes through and returns the stored review with a new version', async () => {
     const id = await create(db, { productName: '마우스', anchorField: 'shoot', anchorDate: '2026-10-20' });
-    const before = (await getReview(db, id))!.updatedAt;
+    const before = (await getReview(db, id))!.version;
     const result = await saveLoaded(id, { publishPlannedOn: '2026-10-28' });
     expect(result.ok).toBe(true);
     const after = (await getReview(db, id))!;
     expect(after.publishPlannedOn).toBe('2026-10-28');
-    expect(result.ok && result.updatedAt).toBe(after.updatedAt);
-    expect(Date.parse(after.updatedAt)).toBeGreaterThanOrEqual(Date.parse(before));
-    // the returned value is good for the next save from the same form (peek stays open after saving)
-    expect((await saveLoaded(id, { title: '두 번째 저장' }, result.ok ? result.updatedAt : undefined)).ok).toBe(true);
+    expect(after.version).toBe(before + 1);
+    expect(result.ok && result.review).toEqual(after);
+    // the returned version is good for the next save from the same form (peek stays open after saving)
+    expect((await saveLoaded(id, { title: '두 번째 저장' }, result.ok ? result.review.version : undefined)).ok).toBe(true);
   });
 
   it('refuses a stale save after a calendar drag elsewhere and writes nothing', async () => {
     const id = await create(db, { productName: '헤드폰', anchorField: 'shoot', anchorDate: '2026-10-20' });
     const loaded = (await getReview(db, id))!;
-    await new Promise((r) => setTimeout(r, 5)); // a different millisecond for the other write
     await moveReviewDate(db, { reviewId: id, field: 'shoot', date: '2026-10-21', startTime: null, endTime: null });
     const input = reviewUpdateSchema.parse({ ...toReviewForm(loaded), productName: '헤드폰 (덮어쓰기)' });
-    expect(await updateReview(db, id, input, new Date(), loaded.updatedAt)).toEqual({ ok: false, error: 'stale' });
+    expect(await updateReview(db, id, input, new Date(), loaded.version)).toEqual({ ok: false, error: 'stale' });
     const now = (await getReview(db, id))!;
     expect([now.productName, now.shootOn]).toEqual(['헤드폰', '2026-10-21']);
   });
@@ -218,16 +220,14 @@ describe('review save: optimistic concurrency (updated_at check)', () => {
     const stages = await stageIdsByName(db);
     const id = await create(db, { productName: '키보드' });
     const loaded = (await getReview(db, id))!;
-    await new Promise((r) => setTimeout(r, 5));
     await moveReviewStage(db, id, stages['촬영']!);
     const input = reviewUpdateSchema.parse({ ...toReviewForm(loaded), title: '탭 A' });
-    expect(await updateReview(db, id, input, new Date(), loaded.updatedAt)).toEqual({ ok: false, error: 'stale' });
+    expect(await updateReview(db, id, input, new Date(), loaded.version)).toEqual({ ok: false, error: 'stale' });
 
     const fresh = (await getReview(db, id))!;
-    await new Promise((r) => setTimeout(r, 5));
     expect((await saveLoaded(id, { title: '탭 B' })).ok).toBe(true); // the other tab saves first
     const tabA = reviewUpdateSchema.parse({ ...toReviewForm(fresh), title: '탭 A' });
-    expect(await updateReview(db, id, tabA, new Date(), fresh.updatedAt)).toEqual({ ok: false, error: 'stale' });
+    expect(await updateReview(db, id, tabA, new Date(), fresh.version)).toEqual({ ok: false, error: 'stale' });
     const row = (await getReview(db, id))!;
     expect([row.title, row.stageName]).toEqual(['탭 B', '촬영']);
   });
@@ -237,14 +237,14 @@ describe('review save: optimistic concurrency (updated_at check)', () => {
     const id = await create(db, { productName: '마이크', templateId: templates.rows[0]!.id });
     const loaded = (await getReview(db, id))!;
     await db.query(`update review_checklist_items set done_at = now() where review_id = $1`, [id]);
+    expect((await getReview(db, id))!.version).toBe(loaded.version);
     const input = reviewUpdateSchema.parse({ ...toReviewForm(loaded), priority: 'high' });
-    expect((await updateReview(db, id, input, new Date(), loaded.updatedAt)).ok).toBe(true);
+    expect((await updateReview(db, id, input, new Date(), loaded.version)).ok).toBe(true);
   });
 
-  it('without an expected updatedAt the save behaves as before (no check)', async () => {
+  it('without an expected version the save behaves as before (no check)', async () => {
     const id = await create(db, { productName: '스피커' });
     const loaded = (await getReview(db, id))!;
-    await new Promise((r) => setTimeout(r, 5));
     await db.query(`update reviews set title = 'elsewhere' where id = $1`, [id]);
     const input = reviewUpdateSchema.parse({ ...toReviewForm(loaded), title: 'mine' });
     expect((await updateReview(db, id, input)).ok).toBe(true);
@@ -256,8 +256,80 @@ describe('review save: optimistic concurrency (updated_at check)', () => {
     const loaded = (await getReview(db, id))!;
     // bypass zod (which would catch it first) to prove the DB is the last word on the same path
     const input = { ...reviewUpdateSchema.parse(toReviewForm(loaded)), writeDueOn: '2026-10-19' };
-    await expect(updateReview(db, id, input, new Date(), loaded.updatedAt)).rejects.toMatchObject({
+    await expect(updateReview(db, id, input, new Date(), loaded.version)).rejects.toMatchObject({
       constraint: 'reviews_shoot_before_write_due',
     });
+  });
+});
+
+// Regressions from the independent peek review (B2 and the SQL compare-and-set contract).
+describe('review save: hidden fields and the version predicate', () => {
+  const db = useAppPool();
+  const admin = useAdminPool();
+  beforeEach(() => resetData(admin));
+
+  const doneStage = async () =>
+    (
+      await db.query<{ id: number }>(
+        `select id from workflow_stages where entity_type = 'review' and category_key = 'done' and archived_at is null order by sort limit 1`,
+      )
+    ).rows[0]!.id;
+
+  it('an unrelated save keeps the precise, automatically recorded published_at (B2)', async () => {
+    const id = await create(db, { productName: '발행 시각', anchorField: 'shoot', anchorDate: '2026-10-20' });
+    const instant = '2026-10-20T02:00:37.123Z';
+    expect((await moveReviewStage(db, id, await doneStage(), new Date(instant))).ok).toBe(true);
+    const loaded = (await getReview(db, id))!;
+    expect(loaded.publishedAt).toBe(instant);
+    const input = reviewUpdateSchema.parse({ ...toReviewForm(loaded), priority: 'high' });
+    expect((await updateReview(db, id, input, new Date(), loaded.version)).ok).toBe(true);
+    expect((await getReview(db, id))!).toMatchObject({ priority: 'high', publishedAt: instant });
+  });
+
+  it('a publish time the owner actually changed is saved (minute precision, KST)', async () => {
+    const id = await create(db, { productName: '발행 시각 변경', anchorField: 'shoot', anchorDate: '2026-10-20' });
+    await moveReviewStage(db, id, await doneStage(), new Date('2026-10-20T02:00:37.123Z'));
+    const loaded = (await getReview(db, id))!;
+    const input = reviewUpdateSchema.parse({ ...toReviewForm(loaded), publishedAtLocal: '2026-10-20T11:30' });
+    expect((await updateReview(db, id, input, new Date(), loaded.version)).ok).toBe(true);
+    expect((await getReview(db, id))!.publishedAt).toBe('2026-10-20T02:30:00.000Z');
+  });
+
+  it('contract: the save UPDATE carries the expected version in its WHERE', () => {
+    const source = readFileSync(path.resolve(import.meta.dirname, '../../src/server/db/reviews.ts'), 'utf8');
+    const body = source.slice(source.indexOf('export async function updateReview('), source.indexOf('interface LockedReview'));
+    const where = /update reviews set[\s\S]*?\swhere\s([\s\S]*?)\sreturning\s/.exec(body)?.[1];
+    expect(where, 'version comparison must be in the UPDATE WHERE, not only in JS').toMatch(/\bversion = \$\d+/);
+  });
+
+  it('the UPDATE itself refuses a version that changed after the lock read: zero rows → stale', async () => {
+    const id = await create(db, { productName: '잠금 뒤 변경' });
+    const loaded = (await getReview(db, id))!;
+    // Same transaction, right after the SELECT … FOR UPDATE: only the UPDATE's own WHERE can notice this.
+    const racing = {
+      query: db.query.bind(db),
+      connect: async () => {
+        const client = await db.connect();
+        const query = async (text: string, values?: unknown[]) => {
+          const result = await client.query(text, values);
+          if (/for update/.test(text)) await client.query(`update reviews set title = '잠금 뒤 수정' where id = $1`, [id]);
+          return result;
+        };
+        return { query, release: () => client.release() } as unknown as pg.PoolClient;
+      },
+    };
+    const input = reviewUpdateSchema.parse({ ...toReviewForm(loaded), title: '덮어쓰기' });
+    expect(await updateReview(racing, id, input, new Date(), loaded.version)).toEqual({ ok: false, error: 'stale' });
+    expect((await getReview(db, id))!.title).toBe('잠금 뒤 수정');
+  });
+
+  it('two saves from the same loaded version: exactly one wins, the other is stale', async () => {
+    const id = await create(db, { productName: '동시 저장' });
+    const loaded = (await getReview(db, id))!;
+    const save = (title: string) =>
+      updateReview(db, id, reviewUpdateSchema.parse({ ...toReviewForm(loaded), title }), new Date(), loaded.version);
+    const results = await Promise.all([save('A'), save('B')]);
+    expect(results.filter((r) => r.ok)).toHaveLength(1);
+    expect(results.filter((r) => !r.ok)).toEqual([{ ok: false, error: 'stale' }]);
   });
 });

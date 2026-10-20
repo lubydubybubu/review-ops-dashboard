@@ -31,6 +31,7 @@ const review: ReviewDetail = {
   archivedAt: null,
   updatedAt: '2026-10-12T00:15:00.123Z',
   createdAt: '2026-10-01T00:00:00.000Z',
+  version: 4,
 };
 
 describe('review form (shared by the detail page and the quick-edit peek)', () => {

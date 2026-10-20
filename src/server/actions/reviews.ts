@@ -33,7 +33,6 @@ import {
 import { runAction, type ActionResult } from './run';
 
 const id = z.coerce.number().int().positive();
-const instant = z.string().refine((v) => !Number.isNaN(Date.parse(v)), '시각 형식이 올바르지 않습니다.');
 
 /** Reviews show up on every page, so mutations refresh the whole (small) app. */
 function refreshAll() {
@@ -49,25 +48,26 @@ export async function createReviewAction(raw: unknown): Promise<ActionResult<{ i
 }
 
 /**
- * Save the review form (full page and quick-edit peek). `expectedUpdatedAt` is the `updatedAt` the form
- * was loaded with; if the review changed since, nothing is written and the stale message comes back.
+ * Save the review form (full page and quick-edit peek). `expectedVersion` is the `version` the form was
+ * loaded with (required: a whole-form save is never unchecked); if the review changed since, nothing is
+ * written and the stale message comes back. On success: the review as stored, with its new version.
  */
 export async function updateReviewAction(
   reviewId: number,
   raw: unknown,
-  expectedUpdatedAt?: string,
-): Promise<ActionResult<{ updatedAt: string }>> {
+  expectedVersion: number,
+): Promise<ActionResult<{ review: ReviewDetail }>> {
   const result = await runAction(
-    z.object({ id, input: reviewUpdateSchema, expectedUpdatedAt: instant.optional() }),
-    { id: reviewId, input: raw, expectedUpdatedAt },
-    (v) => updateReview(getPool(), v.id, v.input, new Date(), v.expectedUpdatedAt),
+    z.object({ id, input: reviewUpdateSchema, expectedVersion: z.number().int().positive() }),
+    { id: reviewId, input: raw, expectedVersion },
+    (v) => updateReview(getPool(), v.id, v.input, new Date(), v.expectedVersion),
   );
   if (!result.ok) return result;
   if (!result.data.ok) {
     return { ok: false, error: result.data.error === 'stale' ? REVIEW_STALE_MESSAGE : STAGE_MOVE_ERROR_MESSAGE[result.data.error] };
   }
   refreshAll();
-  return { ok: true, data: { updatedAt: result.data.updatedAt } };
+  return { ok: true, data: { review: result.data.review } };
 }
 
 export async function moveReviewStageAction(raw: unknown): Promise<ActionResult> {
@@ -100,7 +100,7 @@ export async function searchReviewsAction(q: string): Promise<ActionResult<Revie
   return runAction(searchSchema, { q }, (v) => (v.q ? searchReviews(getPool(), v.q) : Promise.resolve([])));
 }
 
-/** Quick-edit peek: the review (with the `updatedAt` its save will be checked against) and its checklist. */
+/** Quick-edit peek: the review (with the `version` its save will be checked against) and its checklist. */
 export async function reviewPeekAction(
   reviewId: number,
 ): Promise<ActionResult<{ review: ReviewDetail; checklist: ChecklistItem[] }>> {
@@ -126,12 +126,13 @@ export async function addChecklistItemAction(raw: unknown): Promise<ActionResult
   });
 }
 
-export async function toggleChecklistItemAction(raw: unknown): Promise<ActionResult> {
+/** Returns the item as stored, so a caller holding the list (the peek) can update just that item. */
+export async function toggleChecklistItemAction(raw: unknown): Promise<ActionResult<ChecklistItem>> {
   return runAction(checklistToggleSchema, raw, async (v) => {
-    const reviewId = await setChecklistItemDone(getPool(), v.itemId, v.done);
-    if (reviewId === null) throw new NotFoundError('checklist item');
-    revalidatePath(`/reviews/${reviewId}`);
-    return null;
+    const changed = await setChecklistItemDone(getPool(), v.itemId, v.done);
+    if (changed === null) throw new NotFoundError('checklist item');
+    revalidatePath(`/reviews/${changed.reviewId}`);
+    return changed.item;
   });
 }
 

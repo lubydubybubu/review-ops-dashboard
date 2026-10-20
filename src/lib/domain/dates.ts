@@ -55,6 +55,11 @@ export function kstTimeOf(instant: IsoInstant): string {
   return shifted.toISOString().slice(11, 16);
 }
 
+/** KST `YYYY-MM-DDTHH:MM` of an instant (what a datetime-local input holds; seconds are dropped). */
+export function kstDateTimeLocal(instant: IsoInstant): string {
+  return `${kstDateOf(instant)}T${kstTimeOf(instant)}`;
+}
+
 /** The instant for a KST day + wall-clock time. */
 export function kstInstant(date: IsoDate, time: string): IsoInstant {
   if (!isTimeOfDay(time)) throw new RangeError(`invalid time: ${time}`);

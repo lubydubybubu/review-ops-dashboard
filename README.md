@@ -36,7 +36,8 @@ and calendar.
   publish, embargo); dragging a chip changes exactly that one date; timed shoots on a week time grid;
   overdue in red.
 - **Quick edit ("peek")**: click a chip, card or dashboard row to edit the most-used fields in a side panel
-  (bottom sheet on phones) without leaving the page. A save is refused if the review changed elsewhere.
+  (bottom sheet on phones) without leaving the page; focus trap and unsaved-changes guard. A save is refused
+  if the review changed elsewhere (integer `version` check).
 - **Review detail**: all fields, stage history, checklist, markdown notes, embargo warning.
 - **Quick create** (`C`, or click a day) with templates per source (loan / gift / purchase) that preset
   stage, deadline offsets and checklist.
@@ -125,6 +126,7 @@ erDiagram
     timestamptz published_at
     timestamptz updated_at
     timestamptz archived_at
+    int version "bumped by trigger"
   }
   review_stage_history {
     bigint id PK
@@ -178,9 +180,11 @@ Plus `user_settings` (single row), `auth_login_attempts`, `auth_sessions` and th
   logout ends the Ops session within a bounded window. Member logins of the site never grant access.
   The site side is described as a **protocol contract** in [docs/AUTH.md](docs/AUTH.md); the repository ships
   a synthetic implementation for tests, not the real site's code.
-- **Optimistic concurrency.** Forms carry the `updated_at` they were loaded with; a save is refused as stale
-  if the row changed since (another tab, a calendar drag, a board move). Stage moves also lock the row
-  (`select … for update`) so concurrent drags serialize.
+- **Optimistic concurrency with an integer `version` column.** A trigger bumps `reviews.version` on every
+  update from any code path; the full page and quick-edit save are compare-and-set
+  (`where id = … and version = <loaded version>`), so zero rows means "changed elsewhere" (another tab, a
+  calendar drag, a board move) and nothing is written. Checklist toggles live in their own table and never
+  send the old form. Stage moves also lock the row (`select … for update`) so concurrent drags serialize.
 - **KST date handling.** Date-only fields are `date` values meaning a Seoul calendar day; instants are
   `timestamptz` (UTC). Korea has no DST, so the offset is a fixed +09:00 and day arithmetic is done in UTC
   without drift. "Overdue" starts after 23:59:59 KST of the due day. FullCalendar runs in UTC mode with KST

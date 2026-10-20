@@ -14,18 +14,19 @@ type Change = { kind: 'toggle'; id: number; doneAt: string | null } | { kind: 'd
 
 /**
  * Each change saves at once. On the detail page the server refresh brings the new items; a caller that
- * holds the items itself (the quick-edit peek) passes `onChanged` to reload them inside the same transition.
+ * holds the items itself (the quick-edit peek) passes `onItemsChange` and gets just the stored change to
+ * apply to its list (no review reload, so an open review form and its version are left alone).
  */
 export function Checklist({
   reviewId,
   items,
   readOnly,
-  onChanged,
+  onItemsChange,
 }: {
   reviewId: number;
   items: ChecklistItem[];
   readOnly: boolean;
-  onChanged?: () => Promise<void>;
+  onItemsChange?: (update: (items: ChecklistItem[]) => ChecklistItem[]) => void;
 }) {
   const toast = useToast();
   const [, startTransition] = useTransition();
@@ -37,12 +38,16 @@ export function Checklist({
   );
   const done = list.filter((i) => i.doneAt).length;
 
-  function run(change: Change, action: () => Promise<{ ok: boolean; error?: string }>) {
+  function run<T>(
+    change: Change,
+    action: () => Promise<{ ok: true; data: T } | { ok: false; error: string }>,
+    stored: (data: T) => (items: ChecklistItem[]) => ChecklistItem[],
+  ) {
     startTransition(async () => {
       apply(change);
       const result = await action();
-      if (!result.ok) toast(result.error ?? '저장하지 못했습니다.', { tone: 'error' });
-      else await onChanged?.();
+      if (!result.ok) toast(result.error, { tone: 'error' });
+      else onItemsChange?.(stored(result.data));
     });
   }
 
@@ -56,7 +61,7 @@ export function Checklist({
       if (!result.ok) {
         setTitle(value);
         toast(result.error, { tone: 'error' });
-      } else await onChanged?.();
+      } else onItemsChange?.((current) => [...current, result.data]);
     });
   }
 
@@ -78,8 +83,10 @@ export function Checklist({
               checked={item.doneAt !== null}
               disabled={readOnly}
               onChange={(e) =>
-                run({ kind: 'toggle', id: item.id, doneAt: e.target.checked ? new Date().toISOString() : null }, () =>
-                  toggleChecklistItemAction({ itemId: item.id, done: e.target.checked }),
+                run(
+                  { kind: 'toggle', id: item.id, doneAt: e.target.checked ? new Date().toISOString() : null },
+                  () => toggleChecklistItemAction({ itemId: item.id, done: e.target.checked }),
+                  (saved) => (current) => current.map((i) => (i.id === saved.id ? saved : i)),
                 )
               }
             />
@@ -91,7 +98,11 @@ export function Checklist({
                 type="button"
                 aria-label={`${item.title} 삭제`}
                 className="text-subtle opacity-0 group-hover:opacity-100 hover:text-fg focus-visible:opacity-100"
-                onClick={() => run({ kind: 'delete', id: item.id }, () => deleteChecklistItemAction(item.id))}
+                onClick={() =>
+                  run({ kind: 'delete', id: item.id }, () => deleteChecklistItemAction(item.id), () => (current) =>
+                    current.filter((i) => i.id !== item.id),
+                  )
+                }
               >
                 <IconX className="size-3.5" />
               </button>

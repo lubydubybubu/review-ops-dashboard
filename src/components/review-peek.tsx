@@ -35,7 +35,22 @@ interface Target {
   pathname: string;
 }
 
-type Loaded = { review: ReviewDetail; checklist: ChecklistItem[] };
+/**
+ * The form and the version it is saved against, always taken from one stored review and replaced together
+ * (open, reload, successful save) — never by an unrelated read such as a checklist change.
+ */
+interface Snapshot {
+  reviewId: number;
+  review: ReviewDetail;
+  initial: ReviewFormState;
+  form: ReviewFormState;
+  expectedVersion: number;
+}
+
+function snapshotOf(review: ReviewDetail): Snapshot {
+  const form = toReviewForm(review);
+  return { reviewId: review.id, review, initial: form, form, expectedVersion: review.version };
+}
 
 /** Phones get a bottom sheet (modal); wider screens a side panel next to the content (non-modal). */
 const SHEET_QUERY = '(max-width: 640px)';
@@ -66,10 +81,10 @@ export function ReviewPeek({ ref }: { ref: React.Ref<PeekHandle> }) {
   const formRef = useRef<HTMLFormElement>(null);
   const [target, setTarget] = useState<Target | null>(null);
   const [sheet, setSheet] = useState(false);
-  const [data, setData] = useState<Loaded | null>(null);
+  const [snap, setSnap] = useState<Snapshot | null>(null);
+  /** kept apart from the snapshot: each checklist change saves at once and updates only this */
+  const [checklist, setChecklist] = useState<ChecklistItem[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [initial, setInitial] = useState<ReviewFormState | null>(null);
-  const [form, setForm] = useState<ReviewFormState | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<string | null>(null);
   /** set while the unsaved-changes question is showing: what to do after "버리고 닫기" */
@@ -77,11 +92,12 @@ export function ReviewPeek({ ref }: { ref: React.Ref<PeekHandle> }) {
   const [pending, startTransition] = useTransition();
   const latest = useRef<number | null>(null);
 
-  const dirty = form !== null && initial !== null && JSON.stringify(form) !== JSON.stringify(initial);
-  const review = data?.review;
+  const form = snap?.form ?? null;
+  const review = snap?.review;
+  const dirty = snap !== null && JSON.stringify(snap.form) !== JSON.stringify(snap.initial);
   const archived = review?.archivedAt != null;
 
-  const load = useCallback(async (id: number, keepForm = false) => {
+  const load = useCallback(async (id: number) => {
     const result = await reviewPeekAction(id);
     if (latest.current !== id) return; // another review was opened meanwhile
     if (!result.ok) {
@@ -89,20 +105,15 @@ export function ReviewPeek({ ref }: { ref: React.Ref<PeekHandle> }) {
       return;
     }
     setLoadError(null);
-    setData(result.data);
-    if (!keepForm) {
-      const next = toReviewForm(result.data.review);
-      setInitial(next);
-      setForm(next);
-    }
+    setSnap(snapshotOf(result.data.review));
+    setChecklist(result.data.checklist);
   }, []);
 
   const reset = useCallback(() => {
     latest.current = null;
     setTarget(null);
-    setData(null);
-    setInitial(null);
-    setForm(null);
+    setSnap(null);
+    setChecklist(null);
     setErrors({});
     setFormError(null);
     setLoadError(null);
@@ -115,9 +126,8 @@ export function ReviewPeek({ ref }: { ref: React.Ref<PeekHandle> }) {
       latest.current = id;
       setSheet(window.matchMedia(SHEET_QUERY).matches);
       setTarget({ id, returnFocus: returnFocus ?? (() => opener), pathname: window.location.pathname });
-      setData(null);
-      setInitial(null);
-      setForm(null);
+      setSnap(null);
+      setChecklist(null);
       setErrors({});
       setFormError(null);
       setLoadError(null);
@@ -170,21 +180,23 @@ export function ReviewPeek({ ref }: { ref: React.Ref<PeekHandle> }) {
   }, [target, guarded, reset, router]);
 
   function save() {
-    if (!form || !review || !dirty || pending) return;
+    if (!snap || !dirty || pending) return;
     if (!formRef.current?.reportValidity()) return;
     setErrors({});
     setFormError(null);
-    const id = review.id;
+    const { reviewId, form: submitted, expectedVersion } = snap;
     startTransition(async () => {
-      const result = await updateReviewAction(id, form, review.updatedAt);
+      const result = await updateReviewAction(reviewId, submitted, expectedVersion);
       if (!result.ok) {
+        if (latest.current !== reviewId) return; // another review was opened meanwhile
         setErrors(result.fieldErrors ?? {});
         setFormError(result.error);
         return;
       }
       toast('저장했습니다.');
       window.dispatchEvent(new Event(OPS_EVENTS.reviewsChanged));
-      await load(id);
+      // the review as stored (server rules applied) with its new version becomes the form; no second read
+      if (latest.current === reviewId) setSnap(snapshotOf(result.data.review));
     });
   }
 
@@ -270,7 +282,7 @@ export function ReviewPeek({ ref }: { ref: React.Ref<PeekHandle> }) {
   }
 
   const set = <K extends keyof ReviewFormState>(key: K, value: ReviewFormState[K]) =>
-    setForm((f) => (f ? { ...f, [key]: value } : f));
+    setSnap((s) => (s ? { ...s, form: { ...s.form, [key]: value } } : s));
   const today = todayInSeoul();
   const late: CalendarField[] = review && !archived ? overdueFields(review, today) : [];
   const stage = stages.find((s) => String(s.id) === form?.stageId);
@@ -355,7 +367,7 @@ export function ReviewPeek({ ref }: { ref: React.Ref<PeekHandle> }) {
               <p role="alert" className="text-[13px] text-danger">
                 {loadError}
               </p>
-            ) : !form || !data || !review ? (
+            ) : !form || !review || !checklist ? (
               <p className="text-[13px] text-muted" aria-busy="true">
                 불러오는 중…
               </p>
@@ -537,15 +549,17 @@ export function ReviewPeek({ ref }: { ref: React.Ref<PeekHandle> }) {
                   </fieldset>
                 </form>
 
-                {/* its own form: each toggle saves at once, like on the full page */}
+                {/* its own form: each change saves at once, like on the full page, and leaves the form alone */}
                 <div className="mt-6">
                   <Checklist
-                    // remount on reload so the optimistic list starts from the fresh items
-                    key={data.checklist.map((i) => `${i.id}:${i.doneAt ?? ''}`).join('|')}
+                    key={review.id}
                     reviewId={review.id}
-                    items={data.checklist}
+                    items={checklist}
                     readOnly={archived}
-                    onChanged={() => load(review.id, true)}
+                    onItemsChange={(update) => {
+                      const id = review.id;
+                      if (latest.current === id) setChecklist((items) => (items ? update(items) : items));
+                    }}
                   />
                 </div>
               </>

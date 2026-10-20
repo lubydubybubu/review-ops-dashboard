@@ -27,16 +27,22 @@ export async function addChecklistItem(db: Queryable, reviewId: number, title: s
   return rows[0]!;
 }
 
-/** Returns the review id so the caller can revalidate its page. */
-export async function setChecklistItemDone(db: Queryable, itemId: number, done: boolean): Promise<number | null> {
-  const { rows } = await db.query<{ reviewId: number }>(
+/** Returns the item as stored, plus its review id so the caller can revalidate that page. */
+export async function setChecklistItemDone(
+  db: Queryable,
+  itemId: number,
+  done: boolean,
+): Promise<{ reviewId: number; item: ChecklistItem } | null> {
+  const { rows } = await db.query<ChecklistItem & { reviewId: number }>(
     `update review_checklist_items
         set done_at = case when $2 then coalesce(done_at, now()) end
       where id = $1
-      returning review_id as "reviewId"`,
+      returning review_id as "reviewId", id, title, sort, done_at as "doneAt"`,
     [itemId, done],
   );
-  return rows[0]?.reviewId ?? null;
+  if (!rows[0]) return null;
+  const { reviewId, ...item } = rows[0];
+  return { reviewId, item };
 }
 
 export async function deleteChecklistItem(db: Queryable, itemId: number): Promise<number | null> {

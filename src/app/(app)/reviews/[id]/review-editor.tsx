@@ -24,8 +24,9 @@ import { setReviewArchivedAction, updateReviewAction } from '@/server/actions/re
 import type { ReviewDetail } from '@/server/db/reviews';
 
 /**
- * The whole review as one form. Remounted (via key = updated_at) after every save, so
+ * The whole review as one form. Remounted (via key = version) after every save, so
  * what is on screen is always what is stored. Changing the stage saves immediately.
+ * The version a save is checked against is taken once, with the form it belongs to.
  */
 export function ReviewEditor({
   review,
@@ -42,7 +43,7 @@ export function ReviewEditor({
   const toast = useToast();
   const uid = useId();
   const formRef = useRef<HTMLFormElement>(null);
-  const [initial] = useState(() => toReviewForm(review));
+  const [{ initial, expectedVersion }] = useState(() => ({ initial: toReviewForm(review), expectedVersion: review.version }));
   const [form, setForm] = useState<FormState>(initial);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [notesTab, setNotesTab] = useState<'edit' | 'preview'>(review.notesMd ? 'preview' : 'edit');
@@ -60,7 +61,7 @@ export function ReviewEditor({
   function save(state: FormState = form) {
     setErrors({});
     startTransition(async () => {
-      const result = await updateReviewAction(review.id, state, review.updatedAt);
+      const result = await updateReviewAction(review.id, state, expectedVersion);
       if (!result.ok) {
         setErrors(result.fieldErrors ?? {});
         toast(result.error, { tone: 'error' });
