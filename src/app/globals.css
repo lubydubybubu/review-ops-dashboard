@@ -1,0 +1,247 @@
+@import 'tailwindcss';
+
+/*
+ * Brand tokens. Components use the semantic Tailwind colors below (bg-bg, text-fg,
+ * border-line …); light/dark only swaps these variables.
+ */
+:root {
+  --bg: #f8f8f8;
+  --fg: #121212;
+  --muted: #5f5f5f;
+  --subtle: #8c8c8c;
+  --line: rgb(18 18 18 / 0.09);
+  --line-strong: rgb(18 18 18 / 0.18);
+  --surface: #ffffff;
+  --hover: rgb(18 18 18 / 0.045);
+  --accent: #ec553f;
+  --accent-fg: #ffffff;
+  --accent-soft: rgb(236 85 63 / 0.1);
+  --danger: #d1242f;
+  --danger-soft: rgb(209 36 47 / 0.09);
+  --warn: #a86b00;
+  color-scheme: light;
+}
+
+:root.dark {
+  --bg: #121212;
+  --fg: #ececec;
+  --muted: #a3a3a3;
+  --subtle: #767676;
+  --line: rgb(255 255 255 / 0.09);
+  --line-strong: rgb(255 255 255 / 0.18);
+  --surface: #1a1a1a;
+  --hover: rgb(255 255 255 / 0.05);
+  --accent: #ec553f;
+  --accent-fg: #ffffff;
+  --accent-soft: rgb(236 85 63 / 0.16);
+  --danger: #ff6b6b;
+  --danger-soft: rgb(255 107 107 / 0.12);
+  --warn: #e0a43a;
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) {
+    --bg: #121212;
+    --fg: #ececec;
+    --muted: #a3a3a3;
+    --subtle: #767676;
+    --line: rgb(255 255 255 / 0.09);
+    --line-strong: rgb(255 255 255 / 0.18);
+    --surface: #1a1a1a;
+    --hover: rgb(255 255 255 / 0.05);
+    --accent: #ec553f;
+    --accent-fg: #ffffff;
+    --accent-soft: rgb(236 85 63 / 0.16);
+    --danger: #ff6b6b;
+    --danger-soft: rgb(255 107 107 / 0.12);
+    --warn: #e0a43a;
+    color-scheme: dark;
+  }
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-fg: var(--fg);
+  --color-muted: var(--muted);
+  --color-subtle: var(--subtle);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-surface: var(--surface);
+  --color-hover: var(--hover);
+  --color-accent: var(--accent);
+  --color-accent-fg: var(--accent-fg);
+  --color-accent-soft: var(--accent-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-warn: var(--warn);
+  --font-sans:
+    var(--font-inter), 'Pretendard Variable', 'Apple SD Gothic Neo', 'Malgun Gothic', system-ui, sans-serif;
+}
+
+@layer base {
+  html {
+    background: var(--bg);
+    color: var(--fg);
+    -webkit-font-smoothing: antialiased;
+    font-feature-settings: 'cv11', 'ss01';
+  }
+  body {
+    @apply font-sans text-[14px] leading-relaxed;
+  }
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  ::selection {
+    background: var(--accent-soft);
+  }
+  dialog::backdrop {
+    background: rgb(0 0 0 / 0.28);
+  }
+}
+
+@layer components {
+  .input {
+    @apply h-9 w-full rounded-md border border-line bg-surface px-2.5 text-[14px] text-fg outline-none
+      placeholder:text-subtle focus:border-line-strong focus-visible:outline-2 focus-visible:outline-accent;
+  }
+  textarea.input {
+    @apply h-auto py-2 leading-relaxed;
+  }
+  .btn {
+    @apply inline-flex h-9 items-center justify-center gap-1.5 rounded-md border border-line px-3 text-[13px]
+      font-medium text-fg transition-colors hover:bg-hover disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply border-accent bg-accent text-accent-fg hover:bg-accent hover:brightness-95;
+  }
+  .btn-ghost {
+    @apply border-transparent;
+  }
+  .label {
+    @apply mb-1 block text-[12px] font-medium text-muted;
+  }
+  .kbd {
+    @apply inline-flex h-5 min-w-5 items-center justify-center rounded border border-line px-1 font-sans text-[11px]
+      text-muted;
+  }
+  .section-title {
+    @apply flex items-baseline justify-between border-b border-line pb-2 text-[13px] font-semibold tracking-tight;
+  }
+
+  /* rendered markdown notes */
+  .prose-ops {
+    @apply leading-relaxed;
+  }
+  .prose-ops > * + * {
+    @apply mt-3;
+  }
+  .prose-ops h1 {
+    @apply text-[18px] font-semibold;
+  }
+  .prose-ops h2 {
+    @apply mt-5 text-[15px] font-semibold;
+  }
+  .prose-ops h3 {
+    @apply mt-4 text-[14px] font-semibold;
+  }
+  .prose-ops ul {
+    @apply list-disc pl-5;
+  }
+  .prose-ops ol {
+    @apply list-decimal pl-5;
+  }
+  .prose-ops a {
+    @apply text-accent underline underline-offset-2;
+  }
+  .prose-ops code {
+    @apply rounded bg-hover px-1 font-mono text-[13px];
+  }
+  .prose-ops pre {
+    @apply overflow-x-auto rounded-md border border-line p-3;
+  }
+  .prose-ops blockquote {
+    @apply border-l-2 border-line-strong pl-3 text-muted;
+  }
+  .prose-ops hr {
+    @apply border-line;
+  }
+}
+
+/* ------------------------------------------------------------ FullCalendar theme */
+.ops-calendar {
+  --fc-border-color: var(--line);
+  --fc-page-bg-color: var(--bg);
+  --fc-neutral-bg-color: transparent;
+  --fc-today-bg-color: rgb(236 85 63 / 0.06);
+  --fc-event-bg-color: transparent;
+  --fc-event-border-color: transparent;
+  --fc-event-text-color: var(--fg);
+  --fc-now-indicator-color: var(--accent);
+  --fc-highlight-color: var(--hover);
+  --ops-slot-h: 2rem;
+}
+.ops-calendar .fc {
+  font-size: 13px;
+}
+.ops-calendar .fc-col-header-cell-cushion,
+.ops-calendar .fc-daygrid-day-number {
+  color: var(--muted);
+  font-weight: 500;
+  text-decoration: none;
+}
+.ops-calendar .fc-day-today .fc-daygrid-day-number {
+  color: var(--accent);
+  font-weight: 700;
+}
+.ops-calendar .fc-timegrid-slot {
+  height: var(--ops-slot-h);
+}
+.ops-calendar .fc-daygrid-day-frame {
+  min-height: 6.5rem;
+  cursor: cell;
+}
+.ops-calendar .fc-event {
+  box-shadow: none;
+  cursor: grab;
+}
+.ops-calendar .fc-daygrid-event {
+  margin-top: 1px;
+  border-radius: 4px;
+}
+.ops-calendar .fc-event:hover {
+  background: var(--hover);
+}
+.ops-calendar .fc-timegrid-event {
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-left-width: 3px;
+  border-radius: 4px;
+}
+.ops-calendar .fc-event.is-overdue {
+  background: var(--danger-soft);
+}
+.ops-calendar .fc-daygrid-more-link {
+  color: var(--muted);
+}
+.ops-calendar .fc-popover {
+  background: var(--bg);
+  border-color: var(--line-strong);
+}
+.ops-calendar .fc-popover-header {
+  background: var(--hover);
+}
+/* Phones: month cells are ~50px wide, so chips become dots and the agenda list below
+   the grid carries the names. */
+@media (max-width: 640px) {
+  .ops-calendar .fc-daygrid-day-frame {
+    min-height: 4rem;
+  }
+  .ops-calendar .fc {
+    font-size: 11px;
+  }
+  .ops-calendar .fc-dayGridMonth-view .ops-chip-text {
+    display: none;
+  }
+}

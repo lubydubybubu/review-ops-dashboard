@@ -1,0 +1,15 @@
+node_modules/
+.next/
+out/
+coverage/
+*.tsbuildinfo
+next-env.d.ts
+
+# secrets — only .env.example / ops.env.example are committed
+.env*
+!.env.example
+deploy/secrets/
+deploy/ops.env
+
+# test / e2e artefacts
+e2e/.artifacts/

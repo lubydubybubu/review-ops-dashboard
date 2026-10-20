@@ -1,0 +1,16 @@
+import 'server-only';
+import { cache } from 'react';
+import { requireSession } from './auth/session';
+import { getSettings } from './db/settings';
+import { listStages } from './db/stages';
+import { getPool } from './db/pool';
+
+/** Request-scoped loaders shared by layouts and pages (deduplicated per render); each checks the session itself. */
+export const loadSettings = cache(async () => {
+  await requireSession();
+  return getSettings(getPool());
+});
+export const loadStages = cache(async () => {
+  await requireSession();
+  return listStages(getPool());
+});

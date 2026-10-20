@@ -1,0 +1,13 @@
+# Keep secrets, local state and bulky artefacts out of the build context.
+.git
+.env*
+!.env.example
+node_modules
+.next
+out
+coverage
+*.tsbuildinfo
+*.log
+e2e/.artifacts
+docs/screenshots
+deploy/secrets

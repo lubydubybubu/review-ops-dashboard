@@ -1,0 +1,63 @@
+# Review Ops on a dedicated host — generic template. See docs/DEPLOYMENT.md.
+# Secrets are files outside the repo (deploy/secrets/ is git- and docker-ignored); nothing is baked into images.
+#
+#   docker compose -f deploy/compose.yaml --env-file deploy/ops.env run --rm migrate   # gate: must exit 0
+#   docker compose -f deploy/compose.yaml --env-file deploy/ops.env up -d app
+name: review-ops
+
+x-hardening: &hardening
+  read_only: true
+  tmpfs: ["/tmp:size=64m,mode=1777"]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  restart: unless-stopped
+
+services:
+  app:
+    <<: *hardening
+    image: ${OPS_IMAGE:?set OPS_IMAGE=review-ops:<git-sha>}
+    environment:
+      OPS_DEPLOYMENT: production
+      OPS_AUTH_MODE: site
+      OPS_PUBLIC_ORIGIN: ${OPS_PUBLIC_ORIGIN:?exact https origin of Ops}
+      # Only the parent-site ADMIN session may sign in (docs/AUTH.md); member logins never do.
+      OPS_IDENTITY_KIND: admin
+      OPS_AUTH_REVALIDATE_SECONDS: ${OPS_AUTH_REVALIDATE_SECONDS:-30}
+      SITE_ORIGIN: ${SITE_ORIGIN:?exact https origin of the parent site}
+      SITE_CLIENT_ID: ${SITE_CLIENT_ID:-review-ops}
+      SITE_CLIENT_SECRET_FILE: /run/secrets/site_client_secret
+      DATABASE_URL_FILE: /run/secrets/ops_app_database_url
+      # Only set when the reverse proxy in front really sets it (e.g. x-real-ip).
+      OPS_TRUSTED_CLIENT_IP_HEADER: ${OPS_TRUSTED_CLIENT_IP_HEADER:-}
+    secrets: [site_client_secret, ops_app_database_url]
+    # Host loopback only: the reverse proxy on this host is the sole way in.
+    ports: ["127.0.0.1:3000:3000"]
+    mem_limit: 768m
+    pids_limit: 256
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  # One-shot. Runs pending migrations as the schema owner, then re-grants DML to ops_app.
+  # The owner credential is mounted into THIS job only — never into `app`.
+  migrate:
+    <<: *hardening
+    restart: "no"
+    profiles: [migrate]
+    image: ${OPS_MIGRATE_IMAGE:?set OPS_MIGRATE_IMAGE=review-ops-migrate:<git-sha>}
+    environment:
+      OPS_DEPLOYMENT: production
+      MIGRATION_DATABASE_URL_FILE: /run/secrets/ops_owner_database_url
+    secrets: [ops_owner_database_url]
+    command: ["--grant", "ops_app"]
+
+secrets:
+  site_client_secret:
+    file: ./secrets/site_client_secret
+  ops_app_database_url:
+    file: ./secrets/ops_app_database_url
+  ops_owner_database_url:
+    file: ./secrets/ops_owner_database_url
