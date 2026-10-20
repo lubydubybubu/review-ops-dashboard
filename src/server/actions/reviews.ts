@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { todayInSeoul } from '@/lib/domain/dates';
 import { STAGE_MOVE_ERROR_MESSAGE } from '@/lib/domain/stage-move';
 import { REVIEW_STALE_MESSAGE } from '@/lib/review-form';
+import { filterRootSchema } from '@/lib/views';
 import {
   calendarRangeSchema,
   checklistAddSchema,
@@ -33,6 +34,8 @@ import {
 import { runAction, type ActionResult } from './run';
 
 const id = z.coerce.number().int().positive();
+/** A calendar view's range + fields, and its filter (validated here, compiled from closed maps). */
+const calendarChipsSchema = z.intersection(calendarRangeSchema, z.object({ filter: filterRootSchema.optional() }));
 
 /** Reviews show up on every page, so mutations refresh the whole (small) app. */
 function refreshAll() {
@@ -113,7 +116,7 @@ export async function reviewPeekAction(
 }
 
 export async function calendarChipsAction(raw: unknown): Promise<ActionResult<CalendarChip[]>> {
-  return runAction(calendarRangeSchema, raw, (range) => listCalendarChips(getPool(), range, todayInSeoul()));
+  return runAction(calendarChipsSchema, raw, (range) => listCalendarChips(getPool(), range, todayInSeoul()));
 }
 
 // ------------------------------------------------------------- checklist

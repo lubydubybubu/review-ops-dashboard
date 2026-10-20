@@ -17,7 +17,8 @@
  * the same `startSiteFixture` contract, named by `--site-fixture=<path>` or OPS_E2E_SITE_FIXTURE.
  *
  * Env: TEST_DATABASE_URL (superuser URL of a disposable server), CHROME_PATH,
- *      SCREENSHOT_DIR (default ../screenshots), E2E_PORT, OPS_E2E_SITE_FIXTURE.
+ *      SCREENSHOT_DIR (default ../screenshots), VIEWS_SCREENSHOT_DIR (default SCREENSHOT_DIR),
+ *      E2E_PORT, OPS_E2E_SITE_FIXTURE.
  * Needs `openssl` on PATH (per-run throw-away CA).
  */
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -34,6 +35,7 @@ import { hashPassword } from '../src/server/auth/password';
 import { createPool } from '../src/server/db/client';
 import { grantAppRole, runMigrations } from '../src/server/db/migrate';
 import { seedDemo } from '../src/server/db/seed';
+import { defaultConfig, serializeConfig, VIEW_STALE_MESSAGE, type ViewConfig } from '../src/lib/views';
 import { assertDisposableServer, assertGeneratedDatabase } from '../tests/db-guard';
 import { startSiteFixture, type FakeSiteOptions, type SiteFixture } from '../tests/fixtures/fake-site';
 import { CHROME_HOST_RULES, createCertificates, CROSS_SITE_HOST, OPS_HOST, SIBLING_HOST, SITE_HOST, startTlsFront, type TestCertificates } from './tls';
@@ -46,6 +48,8 @@ const DIRECT = `http://127.0.0.1:${PORT}`;
 /** What the browser uses: https://ops.site.test:<proxy port>. Set once the proxy listens. */
 let BASE = '';
 const SCREENSHOT_DIR = path.resolve(process.env.SCREENSHOT_DIR ?? '../screenshots');
+/** Saved-view screenshots (views-*.png); defaults to SCREENSHOT_DIR. */
+const VIEWS_SCREENSHOT_DIR = path.resolve(process.env.VIEWS_SCREENSHOT_DIR ?? SCREENSHOT_DIR);
 const ARTIFACT_DIR = path.resolve('e2e/.artifacts');
 const APP_ROLE = 'ops_app_test';
 const APP_ROLE_PASSWORD = 'ops_app_test_pw';
@@ -275,6 +279,7 @@ async function main() {
     process.exit(1);
   }
   await mkdir(SCREENSHOT_DIR, { recursive: true });
+  await mkdir(VIEWS_SCREENSHOT_DIR, { recursive: true });
   await mkdir(ARTIFACT_DIR, { recursive: true });
 
   const today = todayInSeoul();
@@ -545,6 +550,581 @@ async function main() {
       await page.emulateMedia({ colorScheme: 'light' });
       await page.setViewportSize({ width: 1440, height: 900 });
       assertEqual(count, 20, 'screenshot count');
+    });
+
+    // ------------------------------------------------ saved views (run on the pristine demo seed)
+    const viewNav = page.locator('nav[aria-label="저장된 보기"]');
+    const viewTab = (name: string) => viewNav.getByRole('link', { name, exact: true });
+    const toolbar = page.getByRole('toolbar', { name: '보기 도구' });
+    const toolbarButton = (label: RegExp) => toolbar.getByRole('button', { name: label });
+    const viewPopover = (name: string) => page.getByRole('dialog', { name, exact: true });
+    const dirtyBar = page.locator('[data-view-dirty]');
+    const nativeDialogs: string[] = [];
+    page.on('dialog', (d) => {
+      nativeDialogs.push(d.message());
+      void d.dismiss();
+    });
+    const viewRow = async (name: string) =>
+      (await db.query('select id, layout, position, version, config from saved_views where name = $1', [name])).rows[0] as
+        | { id: number; layout: string; position: number; version: number; config: Record<string, unknown> }
+        | undefined;
+    const count = async (sql: string, params: unknown[] = []) => Number((await db.query(sql, params)).rows[0].n);
+    const LIVE = `from reviews r join workflow_stages s on s.id = r.stage_id where r.archived_at is null`;
+    /** Wait until the table shows exactly `n` review rows (the view re-rendered on the server). */
+    const waitRows = (n: number) =>
+      page.waitForFunction((want) => document.querySelectorAll('tbody tr[data-review-id]').length === want, n);
+    async function openMenu(name: string) {
+      await page.getByRole('button', { name: `‘${name}’ 보기 메뉴` }).click();
+      await page.getByRole('menu').waitFor();
+    }
+    async function createViewVia(name: string, layout: '표' | '보드' | '캘린더') {
+      await viewNav.getByRole('button', { name: '보기 추가' }).click();
+      const dialog = page.getByRole('dialog', { name: '새 보기' });
+      await dialog.getByLabel('보기 이름').fill(name);
+      await dialog.getByText(layout, { exact: true }).click();
+      await dialog.getByRole('button', { name: '만들기' }).click();
+      await dialog.waitFor({ state: 'hidden' });
+      const row = await viewRow(name);
+      assert(row, `view ${name} not in DB`);
+      await page.waitForURL((u) => u.searchParams.get('v') === String(row.id));
+      await viewTab(name).and(page.locator('[aria-current="page"]')).waitFor();
+      return row;
+    }
+    async function saveView(name: string) {
+      await dirtyBar.getByRole('button', { name: '저장', exact: true }).click();
+      await toast(page, `‘${name}’ 보기를 저장했습니다.`).waitFor();
+      await dirtyBar.waitFor({ state: 'hidden' });
+      await page.waitForURL((u) => !u.searchParams.has('cfg'));
+    }
+
+    await test('views: old /reviews /board /calendar URLs (and old table links) open sensible default views', page, async () => {
+      const all = await count(`select count(*) as n ${LIVE}`);
+      await page.goto('/reviews');
+      await viewTab('전체 리뷰').and(page.locator('[aria-current="page"]')).waitFor();
+      await waitRows(all);
+      assertEqual(await viewNav.getByRole('link').allInnerTexts(), ['전체 리뷰', '진행 보드', '캘린더'], 'seeded tabs');
+      assertEqual(await dirtyBar.count(), 0, 'dirty on a clean view');
+
+      await page.goto('/board');
+      await viewTab('진행 보드').and(page.locator('[aria-current="page"]')).waitFor();
+      const stages = await count(`select count(*) as n from workflow_stages where entity_type = 'review' and archived_at is null`);
+      assertEqual(await page.locator('section[data-stage-id]').count(), stages, 'board columns = stages');
+
+      await page.goto('/calendar');
+      await viewTab('캘린더').and(page.locator('[aria-current="page"]')).waitFor();
+      await page.locator('.fc-event').first().waitFor();
+
+      // the dashboard's /reviews?stage=<id> and the brand page's /reviews?brand=<id> still filter (as unsaved edits)
+      const { rows: st } = await db.query(`select id from workflow_stages where entity_type = 'review' and name = '촬영'`);
+      await page.goto(`/reviews?stage=${st[0].id}`);
+      await waitRows(await count(`select count(*) as n ${LIVE} and r.stage_id = $1`, [st[0].id]));
+      await dirtyBar.getByText('저장 안 됨').waitFor();
+      const { rows: br } = await db.query(`select id from brands where name = 'Kestrel Labs'`);
+      await page.goto(`/reviews?brand=${br[0].id}`);
+      await waitRows(await count(`select count(*) as n ${LIVE} and r.brand_id = $1`, [br[0].id]));
+
+      // a board view id on the table URL redirects to the board; an unknown id falls back with a notice
+      const board = (await viewRow('진행 보드'))!;
+      await page.goto(`/reviews?v=${board.id}`);
+      await page.waitForURL(`${BASE}/board?v=${board.id}`);
+      await page.goto('/reviews?v=999999');
+      await page.getByText('요청한 보기를 찾을 수 없어 기본 보기를 엽니다.').waitFor();
+      await waitRows(all);
+    });
+
+    await test('views: new table view — filter + sort + group + hidden column → 저장 → reload shows the same', page, async () => {
+      await page.goto('/reviews');
+      const created = await createViewVia('진행 중 리뷰', '표');
+      // filter: 단계 분류 = 진행 중 (the default new condition)
+      await toolbarButton(/^필터/).click();
+      const filter = viewPopover('필터');
+      await filter.getByRole('button', { name: '조건 추가' }).click();
+      assertEqual(await filter.getByLabel('필터 속성').inputValue(), 'stage_category', 'default condition property');
+      await filter.getByLabel('필터 값').selectOption('in_progress');
+      const inProgress = await count(`select count(*) as n ${LIVE} and s.category_key = 'in_progress'`);
+      await waitRows(inProgress);
+      await page.keyboard.press('Escape');
+      // sort: 발행 예정 ↓
+      await toolbarButton(/^정렬/).click();
+      const sort = viewPopover('정렬');
+      await sort.getByRole('button', { name: '정렬 추가' }).click();
+      await sort.getByLabel('정렬 속성').selectOption('publish_planned');
+      await sort.getByLabel('정렬 방향').selectOption('desc');
+      await page.waitForURL((u) => u.searchParams.get('cfg')?.includes('"dir":"desc"') ?? false);
+      await page.keyboard.press('Escape');
+      // group: 브랜드
+      await toolbarButton(/^그룹/).click();
+      await viewPopover('그룹').getByLabel('그룹 기준').selectOption('brand');
+      const brands = await count(`select count(distinct coalesce(r.brand_id::text, 'none')) as n ${LIVE} and s.category_key = 'in_progress'`);
+      await page.waitForFunction((n) => document.querySelectorAll('tbody[data-group]').length === n, brands);
+      await page.keyboard.press('Escape');
+      // properties: hide the 브랜드 column
+      await toolbarButton(/^속성/).click();
+      await viewPopover('속성').getByLabel('브랜드').uncheck();
+      await page.waitForFunction(() => ![...document.querySelectorAll('thead th')].some((th) => th.textContent?.startsWith('브랜드')));
+      await page.keyboard.press('Escape');
+
+      async function checkShown() {
+        await waitRows(inProgress);
+        assertEqual(await page.locator('tbody[data-group]').count(), brands, 'group count');
+        const counts = await page.locator('[data-group-count]').allInnerTexts();
+        assertEqual(counts.reduce((a, b) => a + Number(b), 0), inProgress, 'group header counts add up');
+        assert(!(await page.locator('thead th').allInnerTexts()).some((t) => t.startsWith('브랜드')), 'brand column visible');
+        const firstGroup = await page.locator('tbody[data-group]').first().locator('tr[data-review-id]').evaluateAll((trs) => trs.map((tr) => Number(tr.getAttribute('data-review-id'))));
+        const { rows } = await db.query('select id from reviews where id = any($1) order by publish_planned_on desc nulls last, id', [firstGroup]);
+        assertEqual(firstGroup, rows.map((r) => r.id), 'sorted by 발행 예정 desc inside a group');
+      }
+      await checkShown();
+      // a refresh keeps unsaved edits (they live in the URL)
+      await page.reload();
+      await dirtyBar.getByText('저장 안 됨').waitFor();
+      await checkShown();
+
+      await saveView('진행 중 리뷰');
+      const stored = (await viewRow('진행 중 리뷰'))!;
+      // jsonb stores object keys in its own order: compare key-order-insensitively
+      const sortedKeys = (v: unknown): unknown =>
+        Array.isArray(v)
+          ? v.map(sortedKeys)
+          : v && typeof v === 'object'
+            ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b)).map(([k, x]) => [k, sortedKeys(x)]))
+            : v;
+      assertEqual(
+        sortedKeys([stored.config.filter, stored.config.sorts, stored.config.groupBy, stored.config.hidden, stored.version]),
+        sortedKeys([
+          { op: 'and', rules: [{ prop: 'stage_category', op: 'is', value: 'in_progress' }] },
+          [{ prop: 'publish_planned', dir: 'desc' }],
+          'brand',
+          ['brand', 'embargo', 'channels'],
+          created.version + 1,
+        ]),
+        'saved config',
+      );
+      await page.reload();
+      await checkShown();
+      assertEqual(await dirtyBar.count(), 0, 'dirty after reload of a saved view');
+    });
+
+    await test('views: a second view keeps independent settings; an unsaved edit survives refresh, 되돌리기 drops it', page, async () => {
+      const all = await count(`select count(*) as n ${LIVE}`);
+      const before = (await viewRow('전체 리뷰'))!;
+      await viewTab('전체 리뷰').click();
+      await page.waitForURL(`${BASE}/reviews?v=${before.id}`);
+      await waitRows(all);
+      assert((await page.locator('thead th').allInnerTexts()).some((t) => t.startsWith('브랜드')), 'brand column hidden on the other view');
+      assertEqual(await page.locator('tbody[data-group]').count(), 0, 'groups on the ungrouped view');
+
+      // unsaved edit: 우선순위 = 높음
+      await toolbarButton(/^필터/).click();
+      const filter = viewPopover('필터');
+      await filter.getByRole('button', { name: '조건 추가' }).click();
+      await filter.getByLabel('필터 속성').selectOption('priority');
+      const high = await count(`select count(*) as n ${LIVE} and r.priority = 'high'`);
+      await waitRows(high);
+      await page.keyboard.press('Escape');
+      await dirtyBar.getByText('저장 안 됨').waitFor();
+      await page.reload();
+      await waitRows(high);
+      await dirtyBar.getByText('저장 안 됨').waitFor();
+      // the other view is untouched by this draft
+      await viewTab('진행 중 리뷰').click();
+      await waitRows(await count(`select count(*) as n ${LIVE} and s.category_key = 'in_progress'`));
+      assertEqual(await dirtyBar.count(), 0, 'draft leaked into the other view');
+      await page.goBack();
+      await waitRows(high);
+      await dirtyBar.getByRole('button', { name: '되돌리기' }).click();
+      await waitRows(all);
+      await dirtyBar.waitFor({ state: 'hidden' });
+      assert(!new URL(page.url()).searchParams.has('cfg'), 'cfg left in the URL');
+      const after = (await viewRow('전체 리뷰'))!;
+      assertEqual([after.version, after.config], [before.version, before.config], 'DB unchanged by draft + 되돌리기');
+    });
+
+    await test('views: rename, duplicate, reorder, delete — in-page dialogs only; the last view of a layout stays', page, async () => {
+      await viewTab('진행 중 리뷰').click();
+      const original = (await viewRow('진행 중 리뷰'))!;
+      await page.waitForURL(`${BASE}/reviews?v=${original.id}`);
+
+      await openMenu('진행 중 리뷰');
+      await page.getByRole('menuitem', { name: '이름 바꾸기' }).click();
+      const rename = page.getByRole('dialog', { name: '보기 이름 바꾸기' });
+      await rename.getByLabel('보기 이름').fill('진행 중 (브랜드별)');
+      await rename.getByRole('button', { name: '저장' }).click();
+      await rename.waitFor({ state: 'hidden' });
+      await viewTab('진행 중 (브랜드별)').waitFor();
+      assertEqual((await viewRow('진행 중 (브랜드별)'))?.id, original.id, 'renamed in DB');
+      // duplicate names in one layout are refused with a Korean message
+      await openMenu('진행 중 (브랜드별)');
+      await page.getByRole('menuitem', { name: '이름 바꾸기' }).click();
+      await rename.getByLabel('보기 이름').fill('전체 리뷰');
+      await rename.getByRole('button', { name: '저장' }).click();
+      await rename.getByRole('alert').filter({ hasText: '같은 이름의 보기가 이미 있습니다.' }).waitFor();
+      await rename.getByRole('button', { name: '취소' }).click();
+
+      await openMenu('진행 중 (브랜드별)');
+      await page.getByRole('menuitem', { name: '복제' }).click();
+      await toast(page, '보기를 복제했습니다').waitFor();
+      const copy = await (async () => {
+        for (let i = 0; i < 20 && !(await viewRow('진행 중 (브랜드별) 복사본')); i++) await page.waitForTimeout(100);
+        return (await viewRow('진행 중 (브랜드별) 복사본'))!;
+      })();
+      await page.waitForURL(`${BASE}/reviews?v=${copy.id}`);
+      assertEqual(copy.config, (await viewRow('진행 중 (브랜드별)'))!.config, 'duplicate copies the settings');
+      assertEqual(copy.position, original.position + 1, 'duplicate sits right after the original');
+
+      await openMenu('진행 중 (브랜드별) 복사본');
+      await page.getByRole('menuitem', { name: '← 앞으로 이동' }).click();
+      await page.waitForFunction(
+        ([a, b]) => {
+          const ids = [...document.querySelectorAll('[data-view-tab]')].map((el) => el.getAttribute('data-view-tab') ?? '');
+          return ids.indexOf(a) >= 0 && ids.indexOf(a) < ids.indexOf(b);
+        },
+        [String(copy.id), String(original.id)] as const,
+      );
+      assert((await viewRow('진행 중 (브랜드별) 복사본'))!.position < (await viewRow('진행 중 (브랜드별)'))!.position, 'positions in DB');
+
+      await openMenu('진행 중 (브랜드별) 복사본');
+      await page.getByRole('menuitem', { name: '삭제' }).click();
+      const confirm = page.getByRole('dialog', { name: '보기 삭제' });
+      await confirm.getByText('‘진행 중 (브랜드별) 복사본’ 보기를 삭제할까요?').waitFor();
+      await confirm.getByRole('button', { name: '취소' }).click();
+      await confirm.waitFor({ state: 'hidden' });
+      assert(await viewRow('진행 중 (브랜드별) 복사본'), 'cancel deleted the view');
+      await openMenu('진행 중 (브랜드별) 복사본');
+      await page.getByRole('menuitem', { name: '삭제' }).click();
+      await confirm.getByRole('button', { name: '삭제' }).click();
+      await toast(page, '보기를 삭제했습니다').waitFor();
+      await page.waitForURL(`${BASE}/reviews`);
+      await viewTab('진행 중 (브랜드별) 복사본').waitFor({ state: 'detached' });
+      assert(!(await viewRow('진행 중 (브랜드별) 복사본')), 'deleted view still in DB');
+
+      // the only calendar view cannot be deleted
+      await page.goto('/calendar');
+      await openMenu('캘린더');
+      await page.getByRole('menuitem', { name: '삭제' }).click();
+      await confirm.getByRole('button', { name: '삭제' }).click();
+      await confirm.getByRole('alert').filter({ hasText: '마지막 보기는 삭제할 수 없습니다.' }).waitFor();
+      await confirm.getByRole('button', { name: '취소' }).click();
+      assertEqual(await count(`select count(*) as n from saved_views where layout = 'calendar'`), 1, 'calendar views');
+      assertEqual(nativeDialogs, [], 'native dialogs');
+    });
+
+    await test('views: board view grouped by brand (counts in column headers), saved and reloaded', page, async () => {
+      await page.goto('/board');
+      await createViewVia('브랜드 보드', '보드');
+      await toolbarButton(/^그룹/).click();
+      await viewPopover('그룹').getByLabel('그룹 기준').selectOption('brand');
+      await page.keyboard.press('Escape');
+      const { rows } = await db.query(
+        `select coalesce('brand-' || r.brand_id, 'none') as key, count(*)::int as n ${LIVE} group by 1 order by 1`,
+      );
+      const expected = Object.fromEntries(rows.map((r) => [r.key as string, r.n as number]));
+      async function checkColumns() {
+        await page.waitForFunction(() => document.querySelector('[data-board-group]')?.getAttribute('data-board-group') === 'brand');
+        const shown = await page.locator('section[data-group]').evaluateAll((els) =>
+          Object.fromEntries(els.map((el) => [el.getAttribute('data-group'), Number(el.querySelector('[data-group-count]')?.textContent)])),
+        );
+        assertEqual(Object.fromEntries(Object.entries(shown).sort()), expected, 'brand columns and counts');
+        assertEqual(await page.locator('section[data-stage-id]').count(), 0, 'stage drop targets on a brand board');
+      }
+      await checkColumns();
+      await saveView('브랜드 보드');
+      await page.reload();
+      await checkColumns();
+      // the default board is still a stage board
+      await viewTab('진행 보드').click();
+      await page.waitForFunction(() => document.querySelector('[data-board-group]')?.getAttribute('data-board-group') === 'stage');
+    });
+
+    await test('views: calendar view plotting only 발행 예정; the default calendar keeps all fields', page, async () => {
+      await page.goto('/calendar?view=month');
+      await createViewVia('발행 일정', '캘린더');
+      await page.locator('.fc-event').first().waitFor();
+      for (const field of ['shoot', 'write_due', 'embargo']) {
+        await page.locator(`[data-field-toggle="${field}"]`).click();
+        await page.locator(`[data-field-toggle="${field}"][aria-pressed="false"]`).waitFor();
+      }
+      const onlyPublish = () =>
+        page.waitForFunction(() => {
+          const chips = [...document.querySelectorAll<HTMLElement>('.fc-event [data-field]')];
+          return chips.length > 0 && chips.every((c) => c.dataset.field === 'publish_planned');
+        });
+      await onlyPublish();
+      await saveView('발행 일정');
+      assertEqual((await viewRow('발행 일정'))!.config.calendarFields, ['publish_planned'], 'saved fields');
+      await page.reload();
+      await onlyPublish();
+      await page.evaluate(() => document.fonts.ready);
+      await page.screenshot({ path: path.join(VIEWS_SCREENSHOT_DIR, 'views-calendar-desktop-light.png') });
+      await viewTab('캘린더').click();
+      await page.waitForFunction(() =>
+        [...document.querySelectorAll<HTMLElement>('.fc-event [data-field]')].some((c) => c.dataset.field !== 'publish_planned'),
+      );
+      assertEqual((await viewRow('캘린더'))!.config.calendarFields, ['shoot', 'write_due', 'publish_planned', 'embargo'], 'default calendar fields');
+    });
+
+    await test('views: Ctrl+K jumps to a saved view by name', page, async () => {
+      await page.goto('/');
+      const input = page.getByRole('combobox', { name: '리뷰 검색, 날짜 또는 명령' });
+      await pressUntilVisible(page, 'Control+k', input);
+      await input.fill('브랜드 보드');
+      // (the 만들기 group also offers "새 리뷰: ‘브랜드 보드’"; the view is listed first, in its own group)
+      await page.getByRole('option', { name: /^브랜드 보드/ }).waitFor();
+      assertEqual(await page.getByRole('option', { selected: true }).textContent(), '브랜드 보드보드 보기', 'first option');
+      await input.press('Enter');
+      const target = (await viewRow('브랜드 보드'))!;
+      await page.waitForURL(`${BASE}/board?v=${target.id}`);
+      await viewTab('브랜드 보드').and(page.locator('[aria-current="page"]')).waitFor();
+    });
+
+    await test('views: screenshots desktop light/dark; 390px tabs scroll sideways and the toolbar is a sheet', page, async () => {
+      const grouped = (await viewRow('진행 중 (브랜드별)'))!;
+      for (const scheme of ['light', 'dark'] as const) {
+        await page.emulateMedia({ colorScheme: scheme });
+        await page.setViewportSize({ width: 1440, height: 900 });
+        await page.goto(`/reviews?v=${grouped.id}`);
+        await page.locator('tbody[data-group]').first().waitFor();
+        await toolbarButton(/^필터/).click();
+        await viewPopover('필터').getByRole('button', { name: '조건 그룹 추가' }).click();
+        await page.waitForURL((u) => u.searchParams.has('cfg'));
+        await page.evaluate(() => document.fonts.ready);
+        await page.waitForTimeout(250);
+        await page.screenshot({ path: path.join(VIEWS_SCREENSHOT_DIR, `views-list-desktop-${scheme}.png`) });
+        await page.keyboard.press('Escape');
+        await page.goto(`/board?v=${(await viewRow('브랜드 보드'))!.id}`);
+        await page.locator('section[data-group]').first().waitFor();
+        await page.evaluate(() => document.fonts.ready);
+        await page.screenshot({ path: path.join(VIEWS_SCREENSHOT_DIR, `views-board-desktop-${scheme}.png`) });
+
+        await page.setViewportSize({ width: 390, height: 844 });
+        await page.goto(`/reviews?v=${grouped.id}`);
+        const list = viewNav.locator('ul');
+        const overflow = await list.evaluate((el) => [el.scrollWidth, el.clientWidth]);
+        assert(overflow[0]! > overflow[1]!, `tab bar does not overflow at 390px: ${overflow}`);
+        assertEqual(await page.evaluate(() => document.documentElement.scrollWidth), 390, 'page scrolls sideways');
+        await page.evaluate(() => document.fonts.ready);
+        await page.screenshot({ path: path.join(VIEWS_SCREENSHOT_DIR, `views-mobile-${scheme}.png`) });
+        // the last tab is reachable by scrolling the bar and opens its view
+        const last = viewNav.getByRole('link').last();
+        const lastName = await last.innerText();
+        await last.click();
+        await viewTab(lastName).and(page.locator('[aria-current="page"]')).waitFor();
+        // settings collapse into one bottom sheet
+        await page.goto(`/reviews?v=${grouped.id}`);
+        await page.getByRole('button', { name: '보기 옵션' }).click();
+        const sheet = page.getByRole('dialog', { name: '보기 옵션' });
+        await sheet.getByRole('heading', { name: '보기 옵션' }).waitFor();
+        const box = (await sheet.boundingBox())!;
+        assert(Math.abs(box.y + box.height - 844) <= 1 && box.width >= 389, `sheet box ${JSON.stringify(box)}`);
+        await sheet.getByLabel('그룹 기준').waitFor();
+        if (scheme === 'light') await page.screenshot({ path: path.join(VIEWS_SCREENSHOT_DIR, 'views-mobile-sheet-light.png') });
+        await sheet.getByRole('button', { name: '닫기' }).click();
+        await sheet.waitFor({ state: 'hidden' });
+      }
+      await page.emulateMedia({ colorScheme: 'light' });
+      await page.setViewportSize({ width: 1440, height: 900 });
+    });
+
+    // ------------------------------------------------ saved views: review regressions (independent review R1 / R2 / prefetch)
+    const insertView = async (name: string, config: unknown, layout = 'list') =>
+      Number(
+        (
+          await db.query(
+            'insert into saved_views (layout, name, position, config) values ($1, $2, (select max(position) + 1 from saved_views), $3) returning id',
+            [layout, name, config],
+          )
+        ).rows[0].id,
+      );
+    const viewById = async (id: number) =>
+      (await db.query('select version, config from saved_views where id = $1', [id])).rows[0] as
+        | { version: number; config: ViewConfig }
+        | undefined;
+    /** Versions sent by the 저장 server action (its first argument's expectedVersion). */
+    function recordSavedVersions(p: Page) {
+      const sent: number[] = [];
+      const listener = (req: PwRequest) => {
+        if (!req.headers()['next-action']) return;
+        try {
+          const args = JSON.parse(req.postData() ?? '');
+          if (typeof args?.[0]?.expectedVersion === 'number') sent.push(args[0].expectedVersion);
+        } catch {
+          // not a JSON-encoded action call
+        }
+      };
+      p.on('request', listener);
+      return { sent, stop: () => p.off('request', listener) };
+    }
+
+    await test('views: a draft keeps its base version through further edits, reload and back; another tab’s save is never overwritten', page, async () => {
+      const name = 'R1 동시 편집';
+      const id = await insertView(name, defaultConfig('list'));
+      const other = await context!.newPage();
+      try {
+        await page.goto(`/reviews?v=${id}`);
+        await other.goto(`/reviews?v=${id}`);
+        // tab A: group by brand → an unsaved draft based on version 1
+        await toolbarButton(/^그룹/).click();
+        await viewPopover('그룹').getByLabel('그룹 기준').selectOption('brand');
+        await page.waitForURL((u) => u.searchParams.get('cfg')?.includes('"groupBy":"brand"') ?? false);
+        await page.keyboard.press('Escape');
+        await page.waitForLoadState('networkidle');
+        // tab B: hide 브랜드 and save → version 2
+        const otherBar = other.locator('[data-view-dirty]');
+        await other.getByRole('toolbar', { name: '보기 도구' }).getByRole('button', { name: /^속성/ }).click();
+        await other.getByRole('dialog', { name: '속성', exact: true }).getByLabel('브랜드').uncheck();
+        await other.waitForURL((u) => u.searchParams.has('cfg'));
+        await other.keyboard.press('Escape');
+        await otherBar.getByRole('button', { name: '저장', exact: true }).click();
+        await otherBar.waitFor({ state: 'hidden' });
+        for (let i = 0; i < 30 && (await viewById(id))!.version !== 2; i++) await page.waitForTimeout(100);
+        assertEqual((await viewById(id))!.version, 2, 'tab B saved');
+        // tab A keeps editing (another server render), reloads, leaves and comes back with Back
+        await toolbarButton(/^정렬/).click();
+        await viewPopover('정렬').getByRole('button', { name: '정렬 추가' }).click();
+        await page.waitForURL((u) => u.searchParams.get('cfg')?.includes('"sorts":[{') ?? false);
+        await page.keyboard.press('Escape');
+        await page.waitForLoadState('networkidle');
+        await page.reload();
+        await dirtyBar.getByText('저장 안 됨').waitFor();
+        await viewTab('전체 리뷰').click();
+        await page.waitForURL((u) => !u.searchParams.has('cfg'));
+        await page.goBack();
+        await page.waitForURL((u) => u.searchParams.get('cfg')?.includes('"sorts":[{') ?? false);
+        await dirtyBar.getByText('저장 안 됨').waitFor();
+        // tab A saves: refused as stale, B's committed setting stays
+        const recorder = recordSavedVersions(page);
+        await dirtyBar.getByRole('button', { name: '저장', exact: true }).click();
+        const staleAlert = page.getByRole('alert').filter({ hasText: VIEW_STALE_MESSAGE });
+        await Promise.race([staleAlert.waitFor(), dirtyBar.waitFor({ state: 'hidden' })]);
+        await page.waitForLoadState('networkidle');
+        recorder.stop();
+        const after = (await viewById(id))!;
+        assert(
+          after.config.hidden.includes('brand'),
+          `another tab's committed edit was overwritten (sent ${JSON.stringify(recorder.sent)}, now version ${after.version}, hidden ${JSON.stringify(after.config.hidden)})`,
+        );
+        assertEqual([after.version, after.config.groupBy], [2, null], 'DB after the refused save');
+        assertEqual(recorder.sent, [1], 'expectedVersion sent = the draft base');
+        await staleAlert.waitFor();
+        // 되돌리기 in the alert: draft dropped, B's settings shown, the baseline moves to version 2
+        await staleAlert.getByRole('button', { name: '되돌리기' }).click();
+        await page.waitForURL((u) => !u.searchParams.has('cfg') && !u.searchParams.has('base'));
+        await dirtyBar.waitFor({ state: 'hidden' });
+        await page.waitForFunction(() => ![...document.querySelectorAll('thead th')].some((th) => th.textContent?.startsWith('브랜드')));
+        await toolbarButton(/^그룹/).click();
+        await viewPopover('그룹').getByLabel('그룹 기준').selectOption('priority');
+        await page.waitForURL((u) => u.searchParams.get('base') === '2');
+        await page.keyboard.press('Escape');
+        await saveView(name);
+        const saved = (await viewById(id))!;
+        assertEqual([saved.version, saved.config.groupBy, saved.config.hidden.includes('brand')], [3, 'priority', true], 'rebased save');
+      } finally {
+        await other.close();
+        await db.query('delete from saved_views where id = $1', [id]);
+      }
+    });
+
+    await test('views: a versionless link draft is never saved silently; 새 보기로 저장 or an explicit overwrite', page, async () => {
+      const before = (await viewRow('전체 리뷰'))!;
+      const { rows: st } = await db.query(`select id from workflow_stages where entity_type = 'review' and name = '촬영'`);
+      const stageId = Number(st[0].id);
+      let created = 0;
+      try {
+        // an old dashboard link: an unsaved draft of the default view without a base version
+        await page.goto(`/reviews?stage=${stageId}`);
+        await dirtyBar.getByText('저장 안 됨').waitFor();
+        await dirtyBar.getByRole('button', { name: '저장', exact: true }).click();
+        const confirm = page.getByRole('dialog', { name: '보기 덮어쓰기' });
+        await Promise.race([confirm.waitFor(), dirtyBar.waitFor({ state: 'hidden' })]);
+        await page.waitForLoadState('networkidle');
+        const untouched = (await viewRow('전체 리뷰'))!;
+        assertEqual([untouched.version, untouched.config], [before.version, before.config], 'link draft saved over the view without asking');
+        await confirm.getByRole('button', { name: '취소' }).click();
+        await confirm.waitFor({ state: 'hidden' });
+
+        // 새 보기로 저장 keeps the link's filter in a new view; the default view is unchanged
+        await dirtyBar.getByRole('button', { name: '새 보기로 저장' }).click();
+        const saveAs = page.getByRole('dialog', { name: '새 보기로 저장' });
+        await saveAs.getByLabel('보기 이름').fill('촬영 단계');
+        await saveAs.getByRole('button', { name: '저장' }).click();
+        await saveAs.waitFor({ state: 'hidden' });
+        const row = (await viewRow('촬영 단계'))!;
+        assert(row, 'new view not in DB');
+        created = row.id;
+        await page.waitForURL((u) => u.searchParams.get('v') === String(created) && !u.searchParams.has('cfg'));
+        // (jsonb reorders object keys: compare fields)
+        const rules = (row.config.filter as ViewConfig['filter']).rules as { prop: string; op: string; value: unknown }[];
+        assertEqual(rules.map((r) => [r.prop, r.op, r.value]), [['stage', 'is', stageId]], 'new view filter');
+        assertEqual((await viewRow('전체 리뷰'))!.version, before.version, 'default view version');
+
+        // a hand-made cfg URL (no base): overwrite only through the explicit prompt
+        const handMade = { ...(row.config as ViewConfig), groupBy: 'priority' as const };
+        await page.goto(`/reviews?v=${created}&cfg=${encodeURIComponent(serializeConfig(handMade))}`);
+        await dirtyBar.getByRole('button', { name: '저장', exact: true }).click();
+        await confirm.getByRole('button', { name: '덮어쓰기' }).click();
+        await toast(page, '‘촬영 단계’ 보기를 저장했습니다.').waitFor();
+        await page.waitForURL((u) => !u.searchParams.has('cfg'));
+        const overwritten = (await viewById(created))!;
+        assertEqual([overwritten.version, overwritten.config.groupBy], [row.version + 1, 'priority'], 'explicit overwrite');
+      } finally {
+        if (created) await db.query('delete from saved_views where id = $1', [created]);
+        const now = (await viewRow('전체 리뷰'))!;
+        if (JSON.stringify(now.config) !== JSON.stringify(before.config)) {
+          await db.query('update saved_views set config = $2 where id = $1', [before.id, before.config]);
+        }
+      }
+    });
+
+    await test('views: crafted cfg URLs (NUL, 9999-12-31, legacy q) and a stored out-of-range config fall back with the notice, never HTTP 500', page, async () => {
+      const stored = await insertView('R2 저장된 범위 밖 날짜', { ...defaultConfig('list'), filter: { op: 'and', rules: [{ prop: 'shoot', op: 'after', value: '9999-12-31' }] } });
+      const probe = await context!.newPage();
+      try {
+        await probe.goto('/reviews');
+        const fetchPage = (url: string) =>
+          probe.evaluate(async (u) => {
+            const r = await fetch(u);
+            return { status: r.status, body: await r.text() };
+          }, url);
+        const draft = (rules: unknown[], layout: 'list' | 'board' = 'list') =>
+          encodeURIComponent(JSON.stringify({ ...defaultConfig(layout), filter: { op: 'and', rules } }));
+        const cases: [string, string, RegExp | null][] = [
+          ['list NUL', `/reviews?cfg=${draft([{ prop: 'product', op: 'contains', value: '\u0000' }])}`, /주소에 담긴 보기 설정이 올바르지 않아/],
+          ['list after 9999-12-31', `/reviews?cfg=${draft([{ prop: 'shoot', op: 'after', value: '9999-12-31' }])}`, /주소에 담긴 보기 설정이 올바르지 않아/],
+          ['board NUL', `/board?cfg=${draft([{ prop: 'title', op: 'contains', value: 'a\u0000' }], 'board')}`, /주소에 담긴 보기 설정이 올바르지 않아/],
+          ['legacy q NUL', `/reviews?q=${encodeURIComponent('x\u0000')}`, null],
+          ['stored after 9999-12-31', `/reviews?v=${stored}`, /저장된 보기 설정을 읽지 못해 기본 설정으로 표시합니다/],
+        ];
+        const failures: string[] = [];
+        for (const [label, url, notice] of cases) {
+          const { status, body } = await fetchPage(url);
+          const broken = status >= 500 || body.includes('NEXT_HTTP_ERROR_FALLBACK;500');
+          if (broken || status !== 200 || (notice && !notice.test(body))) failures.push(`${label}: HTTP ${status}${broken ? ' (server error)' : ''}`);
+        }
+        assertEqual(failures, [], 'crafted view URLs');
+      } finally {
+        await probe.close();
+        await db.query('delete from saved_views where id = $1', [stored]);
+      }
+    });
+
+    await test('list rows and board cards do not prefetch /reviews/[id] on load', page, async () => {
+      const prefetched: string[] = [];
+      const listener = (req: PwRequest) => {
+        const url = new URL(req.url());
+        if (/^\/reviews\/\d+$/.test(url.pathname) && req.headers()['rsc']) prefetched.push(url.pathname);
+      };
+      page.on('request', listener);
+      try {
+        for (const route of ['/reviews', '/board']) {
+          await page.goto(route);
+          await page.locator('[data-review-id]').first().waitFor();
+          await page.waitForLoadState('networkidle');
+          await page.waitForTimeout(400);
+        }
+      } finally {
+        page.off('request', listener);
+      }
+      assertEqual([...new Set(prefetched)].length, 0, 'detail prefetches');
     });
 
     let createdId = 0;

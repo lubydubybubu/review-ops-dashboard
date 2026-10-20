@@ -14,14 +14,16 @@ import dayGridPlugin from '@fullcalendar/daygrid';
 import interactionPlugin, { type DateClickArg, type EventResizeDoneArg } from '@fullcalendar/interaction';
 import FullCalendar from '@fullcalendar/react';
 import timeGridPlugin from '@fullcalendar/timegrid';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Dot, OverdueTag } from '@/components/badges';
 import { IconChevronLeft, IconChevronRight } from '@/components/icons';
 import { PeekLink } from '@/components/peek-link';
 import { OPS_EVENTS, useShell } from '@/components/shell-context';
 import { useToast } from '@/components/toast';
+import { useView } from '@/components/views/view-context';
 import { formatDateKo, kstDateOf, kstTimeOf, type IsoDate } from '@/lib/domain/dates';
 import { CALENDAR_FIELD_META, CALENDAR_FIELDS, type CalendarField } from '@/lib/domain/review';
+import type { FilterRoot } from '@/lib/view-config';
 import { calendarChipsAction, moveReviewDateAction } from '@/server/actions/reviews';
 import { updateSettingsAction } from '@/server/actions/settings';
 import type { CalendarChip } from '@/server/db/calendar';
@@ -93,7 +95,12 @@ export function ReviewCalendar({
   const calendarRef = useRef<FullCalendar>(null);
   const [title, setTitle] = useState('');
   const [view, setView] = useState<View>(initialView);
-  const [fields, setFields] = useState<CalendarField[]>(settings.calendarFields);
+  // The plotted date fields and the filter belong to the open saved view (toggling a field is a view edit).
+  const { config, update } = useView();
+  const fieldsKey = config.calendarFields.join(',');
+  const filterKey = JSON.stringify(config.filter);
+  const fields = useMemo(() => (fieldsKey ? (fieldsKey.split(',') as CalendarField[]) : []), [fieldsKey]);
+  const filter = useMemo(() => JSON.parse(filterKey) as FilterRoot, [filterKey]);
   const [weekStart, setWeekStart] = useState(settings.weekStart);
   const [showWeekends, setShowWeekends] = useState(settings.showWeekends);
   const [hour24, setHour24] = useState(settings.timeFormat24h);
@@ -111,15 +118,15 @@ export function ReviewCalendar({
     [toast],
   );
 
-  // A new function identity makes FullCalendar refetch, so toggling a field reloads chips.
+  // A new function identity makes FullCalendar refetch, so toggling a field or editing the filter reloads chips.
   const fetchEvents = useCallback(
     (info: EventSourceFuncArg, success: (events: EventInput[]) => void, failure: (error: Error) => void) => {
-      calendarChipsAction({ from: info.startStr.slice(0, 10), to: info.endStr.slice(0, 10), fields }).then(
+      calendarChipsAction({ from: info.startStr.slice(0, 10), to: info.endStr.slice(0, 10), fields, filter }).then(
         (result) => (result.ok ? success(result.data.map(toEvent)) : failure(new Error(result.error))),
         failure,
       );
     },
-    [fields],
+    [fields, filter],
   );
 
   const switchView = useCallback(
@@ -179,8 +186,7 @@ export function ReviewCalendar({
 
   function toggleField(field: CalendarField) {
     const next = fields.includes(field) ? fields.filter((f) => f !== field) : CALENDAR_FIELDS.filter((f) => f === field || fields.includes(f));
-    setFields(next);
-    void persist({ calendarFields: next });
+    update({ ...config, calendarFields: next });
   }
 
   return (

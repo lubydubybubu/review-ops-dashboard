@@ -4,20 +4,22 @@ import { useRouter } from 'next/navigation';
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { parseDateQuery } from '@/lib/domain/date-query';
 import { formatDateKo, todayInSeoul } from '@/lib/domain/dates';
+import { LAYOUT_LABEL, viewHref } from '@/lib/view-config';
 import { searchReviewsAction } from '@/server/actions/reviews';
 import type { ReviewSearchHit } from '@/server/db/reviews';
+import type { SavedViewSummary } from '@/server/db/views';
 import { Dot } from './badges';
 import { Dialog } from './dialog';
-import { IconArrowRight, IconCalendar, IconPlus, IconSearch } from './icons';
+import { IconArrowRight, IconCalendar, IconPlus, IconSearch, IconTable } from './icons';
 import { NAV_ITEMS } from './nav';
 
 interface Command {
   id: string;
-  group: '리뷰' | '만들기' | '이동';
+  group: '리뷰' | '보기' | '만들기' | '이동';
   label: string;
   hint?: string;
   color?: string;
-  icon?: 'plus' | 'calendar' | 'go';
+  icon?: 'plus' | 'calendar' | 'go' | 'view';
   run: () => void;
 }
 
@@ -25,19 +27,29 @@ export function CommandPalette({
   open,
   onClose,
   onCreate,
+  views,
 }: {
   open: boolean;
   onClose: () => void;
   onCreate: (productName: string) => void;
+  views: SavedViewSummary[];
 }) {
   return (
     <Dialog open={open} onClose={onClose} label="명령 팔레트" className="mt-[12vh] mb-auto w-[min(38rem,calc(100vw-2rem))]">
-      <Palette onClose={onClose} onCreate={onCreate} />
+      <Palette onClose={onClose} onCreate={onCreate} views={views} />
     </Dialog>
   );
 }
 
-function Palette({ onClose, onCreate }: { onClose: () => void; onCreate: (productName: string) => void }) {
+function Palette({
+  onClose,
+  onCreate,
+  views,
+}: {
+  onClose: () => void;
+  onCreate: (productName: string) => void;
+  views: SavedViewSummary[];
+}) {
   const router = useRouter();
   const listId = useId();
   const [query, setQuery] = useState('');
@@ -82,6 +94,19 @@ function Palette({ onClose, onCreate }: { onClose: () => void; onCreate: (produc
         run: go(`/reviews/${hit.id}`),
       });
     }
+    // saved views by name (all of them while the query is empty)
+    const lower = q.toLowerCase();
+    for (const v of views) {
+      if (q && !v.name.toLowerCase().includes(lower)) continue;
+      list.push({
+        id: `view-${v.id}`,
+        group: '보기',
+        label: v.name,
+        hint: `${LAYOUT_LABEL[v.layout]} 보기`,
+        icon: 'view',
+        run: go(viewHref(v.layout, v.id, null)),
+      });
+    }
     list.push({
       id: 'create',
       group: '만들기',
@@ -93,7 +118,6 @@ function Palette({ onClose, onCreate }: { onClose: () => void; onCreate: (produc
         onCreate(date ? '' : q);
       },
     });
-    const lower = q.toLowerCase();
     if (!q || '오늘 today'.includes(lower)) {
       list.push({ id: 'today', group: '이동', label: '오늘로 이동', hint: 'T', icon: 'calendar', run: go(`/calendar?date=${todayInSeoul()}`) });
     }
@@ -103,7 +127,7 @@ function Palette({ onClose, onCreate }: { onClose: () => void; onCreate: (produc
       }
     }
     return list;
-  }, [query, hits, onClose, onCreate, router]);
+  }, [query, hits, views, onClose, onCreate, router]);
 
   const current = Math.min(active, Math.max(commands.length - 1, 0));
 
@@ -164,6 +188,8 @@ function Palette({ onClose, onCreate }: { onClose: () => void; onCreate: (produc
                   <IconPlus className="size-3.5 text-muted" />
                 ) : cmd.icon === 'calendar' ? (
                   <IconCalendar className="size-3.5 text-muted" />
+                ) : cmd.icon === 'view' ? (
+                  <IconTable className="size-3.5 text-muted" />
                 ) : (
                   <IconArrowRight className="size-3.5 text-muted" />
                 )}

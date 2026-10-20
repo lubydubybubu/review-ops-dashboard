@@ -11,9 +11,11 @@ import { planStageMove, type StageMoveError } from '@/lib/domain/stage-move';
 import type { FILTER_FIELDS, SORT_KEYS } from '@/lib/review-filter';
 import { applyTemplateOffsets } from '@/lib/domain/templates';
 import type { DateMoveInput, ReviewCreateInput, ReviewUpdateInput } from '@/lib/validation';
+import type { FilterRoot, SortSpec } from '@/lib/views';
 import { likePattern, withTransaction, type Database, type Queryable } from './client';
 import { getDefaultStage, getStage } from './stages';
 import { getTemplate } from './templates';
+import { compileFilter, compileOrder, sqlParams } from './view-sql';
 
 export class NotFoundError extends Error {
   constructor(what: string) {
@@ -220,6 +222,27 @@ export async function listReviews(db: Queryable, filter: ReviewFilter = {}): Pro
       order by ${order}
       limit ${param(filter.limit ?? 500)}`,
     params,
+  );
+  return rows;
+}
+
+/** Upper bound on rows a list/board view loads (same as the table before views). */
+export const VIEW_ROW_LIMIT = 500;
+
+/** Rows for a saved view (list / board): its filter and sorts compiled from closed maps, values bound. */
+export async function listReviewsForView(
+  db: Queryable,
+  view: { filter: FilterRoot; sorts: readonly SortSpec[] },
+  options: { today: IsoDate; archived?: boolean; limit?: number },
+): Promise<ReviewListItem[]> {
+  const { values, param } = sqlParams();
+  const where = compileFilter(view.filter, { param, today: options.today });
+  const { rows } = await db.query<ReviewListItem>(
+    `select ${LIST_COLUMNS} ${FROM}
+      where ${options.archived ? 'r.archived_at is not null' : 'r.archived_at is null'} and (${where})
+      order by ${compileOrder(view.sorts)}
+      limit ${param(options.limit ?? VIEW_ROW_LIMIT)}`,
+    values,
   );
   return rows;
 }

@@ -29,8 +29,12 @@ and calendar.
 ## Features (phase 1: review schedule)
 
 - **Dashboard**: overdue reviews, counts per stage, this week at a glance.
-- **Review table**: filters for stage, category, brand, date range and text; column sorting; archive.
-  Filter state lives in the URL.
+- **Saved views**: Notion-style view tabs over the table, board and calendar (add, rename, duplicate,
+  reorder, delete). Each view keeps its own AND/OR filter (one nesting level), ordered multi-sort,
+  group-by with counts, visible columns or card fields, and plotted calendar dates. Edits apply at once and
+  stay in the URL as "저장 안 됨" until saved, reverted or saved as a new view.
+- **Review table**: rendered from the active view (filter, sort, group); header-click sorting; archive.
+  Old `/reviews?stage=…` links open the default view with an unsaved filter.
 - **Board**: kanban per stage; dragging a card changes the stage and writes stage history.
 - **Calendar**: month/week; pick which date fields appear as colored chips (shoot, write-by, planned
   publish, embargo); dragging a chip changes exactly that one date; timed shoots on a week time grid;
@@ -41,7 +45,8 @@ and calendar.
 - **Review detail**: all fields, stage history, checklist, markdown notes, embargo warning.
 - **Quick create** (`C`, or click a day) with templates per source (loan / gift / purchase) that preset
   stage, deadline offsets and checklist.
-- **Command palette** (`Ctrl/⌘ K`): jump to a review, create one, go to a date (`11/3`, `내일`, `+7`).
+- **Command palette** (`Ctrl/⌘ K`): jump to a review, create one, jump to a saved view, go to a date (`11/3`, `내일`,
+  `+7`).
 - **Brands** (archive instead of delete) and **settings** (week start, weekends, 24h clock, theme, stages,
   templates). Light/dark, works at 390 px, Korean UI.
 
@@ -77,6 +82,8 @@ Code layout:
 db/migrations/NNN-*.sql   versioned schema (applied by src/server/db/migrate.ts)
 src/lib/domain/*          pure rules: KST dates, overdue, template offsets, stage-move plan, palette dates
 src/lib/validation.ts     zod schemas shared by actions and tests
+src/lib/views.ts          saved-view config schema (zod); src/lib/view-config.ts is the zod-free client half
+src/server/db/view-sql.ts view config → parameterized SQL from closed property/operator maps
 src/server/db/*           typed data layer: parameterized SQL only
 src/server/actions/*      'use server': session → Origin → zod → data layer → typed result
 src/server/auth/*         server-side sessions, handoff client (PKCE, back channel), rate limits
@@ -152,7 +159,17 @@ erDiagram
     bigint template_id FK
     text title
   }
+  saved_views {
+    bigint id PK
+    text layout "list | board | calendar"
+    text name
+    int position
+    jsonb config "validated filter / sort / group"
+    int version "compare-and-set token"
+  }
 ```
+
+`saved_views` (migration 007) references nothing; its `config` is only ever written after zod validation.
 
 Plus `user_settings` (single row), `auth_login_attempts`, `auth_sessions` and the runner's
 `schema_migrations` ledger (filename, checksum, applied_at).
@@ -185,6 +202,12 @@ Plus `user_settings` (single row), `auth_login_attempts`, `auth_sessions` and th
   (`where id = … and version = <loaded version>`), so zero rows means "changed elsewhere" (another tab, a
   calendar drag, a board move) and nothing is written. Checklist toggles live in their own table and never
   send the old form. Stage moves also lock the row (`select … for update`) so concurrent drags serialize.
+- **Saved views as validated JSON compiled to SQL from a whitelist.** Each view's filter / sort / group is a
+  jsonb config validated by one zod schema (pages, actions and the old-link parser share it) and compiled to
+  parameterized SQL only through closed property and operator maps, so no user text ever becomes SQL. Saving
+  is compare-and-set on the view's `version`; an unsaved draft pins the version it started from (`?base=` in
+  the URL), so saving never overwrites newer settings from another tab. A config that still cannot run falls
+  back to the saved settings with an inline notice.
 - **KST date handling.** Date-only fields are `date` values meaning a Seoul calendar day; instants are
   `timestamptz` (UTC). Korea has no DST, so the offset is a fixed +09:00 and day arithmetic is done in UTC
   without drift. "Overdue" starts after 23:59:59 KST of the due day. FullCalendar runs in UTC mode with KST

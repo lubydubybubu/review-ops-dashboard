@@ -6,6 +6,8 @@ import { useShell } from './shell-context';
 /**
  * A link to /reviews/[id] whose plain click opens the quick-edit peek instead. Modifier / middle
  * clicks keep their browser meaning (new tab etc.), and without JS it is still the full page link.
+ * No route prefetch: a plain click opens the peek (its own action), so prefetching every card's detail
+ * page only cost server work.
  */
 export function PeekLink({
   reviewId,
@@ -14,6 +16,7 @@ export function PeekLink({
   const { openPeek } = useShell();
   return (
     <Link
+      prefetch={false}
       {...props}
       href={`/reviews/${reviewId}`}
       data-peek-link={reviewId}

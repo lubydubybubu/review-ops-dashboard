@@ -7,6 +7,7 @@ import { todayInSeoul } from '@/lib/domain/dates';
 import type { Stage } from '@/lib/domain/review';
 import { logout } from '@/server/actions/auth';
 import type { UserSettings } from '@/server/db/settings';
+import type { SavedViewSummary } from '@/server/db/views';
 import { CommandPalette } from './command-palette';
 import { Dialog } from './dialog';
 import {
@@ -49,12 +50,15 @@ export function AppShell({
   templates,
   brands,
   settings,
+  views,
   children,
 }: {
   stages: Stage[];
   templates: TemplateOption[];
   brands: { id: number; name: string }[];
   settings: UserSettings;
+  /** saved views, for the palette's "jump to view" */
+  views: SavedViewSummary[];
   children: React.ReactNode;
 }) {
   const router = useRouter();
@@ -211,7 +215,7 @@ export function AppShell({
 
         <ReviewPeek ref={peekRef} />
         {overlay.kind === 'create' ? <QuickCreateDialog open prefill={overlay.prefill} onClose={close} /> : null}
-        {overlay.kind === 'palette' ? <CommandPalette open onClose={close} onCreate={createFromPalette} /> : null}
+        {overlay.kind === 'palette' ? <CommandPalette open onClose={close} onCreate={createFromPalette} views={views} /> : null}
         <Dialog open={overlay.kind === 'shortcuts'} onClose={close} label="단축키">
           <ShortcutSheet />
         </Dialog>
@@ -221,7 +225,7 @@ export function AppShell({
 }
 
 const SHORTCUTS: [string[], string][] = [
-  [['Ctrl/⌘', 'K'], '명령 팔레트 (리뷰 찾기 · 날짜 이동 · 만들기)'],
+  [['Ctrl/⌘', 'K'], '명령 팔레트 (리뷰 · 저장된 보기 찾기 · 날짜 이동 · 만들기)'],
   [['C'], '새 리뷰'],
   [['T'], '오늘 (캘린더)'],
   [['?'], '단축키 보기'],

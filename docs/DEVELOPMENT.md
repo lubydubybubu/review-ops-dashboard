@@ -22,6 +22,16 @@ split of roles, so that no single agent both writes and approves a change.
   one-way sync of published posts from the parent site (planned: idempotent upsert keyed by the site's
   post id, never overwriting fields edited in Ops, never auto-publishing or deleting).
 
+## Saved views
+
+- Migration `007-saved-views.sql` adds `saved_views`. Apply migrations with `--grant <app role>` before
+  starting the new build so the runtime role has DML privileges on the new table.
+- `?v=<id>` selects a view; `?cfg=<json>` holds an unsaved draft; `?base=<version>` pins its original
+  compare-and-set token. Drafts without a base require save-as-new or explicit overwrite confirmation.
+- One server-side zod schema validates config values; closed property/operator maps compile them to
+  parameterized SQL. Client components use the zod-free config module. Dates are restricted to
+  1900-01-01 through 2999-12-31; text and view names reject C0 control characters.
+
 ## Demo mode
 
 - All brands, products and reviews in the seed and screenshots are **fictional**.

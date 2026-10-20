@@ -9,6 +9,7 @@ const CONSTRAINT_MESSAGE: Record<string, string> = {
   brands_name_uq: '같은 이름의 브랜드가 이미 있습니다.',
   workflow_stages_name_uq: '같은 이름의 단계가 이미 있습니다.',
   templates_name_uq: '같은 이름의 템플릿이 이미 있습니다.',
+  saved_views_layout_name_uq: '같은 이름의 보기가 이미 있습니다.',
 };
 
 interface PgError {
