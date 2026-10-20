@@ -25,6 +25,8 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm run test:unit
+      - name: mail producer tests (stdlib Python)
+        run: python3 mail-ingest/test_post_candidates.py
       - run: npm run build
 
   integration:

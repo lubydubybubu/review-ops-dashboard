@@ -42,10 +42,12 @@ ENV NODE_ENV=production \
     HOSTNAME=0.0.0.0
 COPY --from=build --chown=node:node /app/.next/standalone ./
 COPY --from=build --chown=node:node /app/.next/static ./.next/static
+# Stamps each request with its TCP peer address (the mail-ingest allowlist checks that, never forwarded headers).
+COPY --from=build --chown=node:node /app/scripts/peer-address.mjs ./peer-address.mjs
 USER node
 EXPOSE 3000
 # Unauthenticated, fixed body ({"status":"ok"}): process up + database answering. No data, no versions.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD ["node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
 # Startup runs the server only: never migrations, never demo seed/reset.
-CMD ["node", "server.js"]
+CMD ["node", "--import", "./peer-address.mjs", "server.js"]

@@ -17,6 +17,24 @@ export interface QuickCreatePrefill {
   productName?: string;
   anchorField?: AnchorField;
   anchorDate?: IsoDate;
+  /** 리뷰로 등록 from the mail inbox: the form saves through the candidate (one transaction) */
+  mail?: MailPrefill;
+}
+
+/** What the mail inbox hands quick create (extracted fields, the owner reviews them before saving). */
+export interface MailPrefill {
+  candidateId: number;
+  /** the candidate version the inbox showed (compare-and-set) */
+  version: number;
+  subject: string;
+  sender: string;
+  productName: string;
+  brandName: string | null;
+  sourceType: SourceType | null;
+  writeDueOn: IsoDate | null;
+  publishPlannedOn: IsoDate | null;
+  embargoUntil: IsoDate | null;
+  memo: string;
 }
 
 export interface ShellApi {

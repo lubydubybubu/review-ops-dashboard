@@ -15,6 +15,7 @@ import {
   IconCalendar,
   IconHome,
   IconLogout,
+  IconMail,
   IconMenu,
   IconPlus,
   IconSearch,
@@ -34,6 +35,7 @@ const ICONS = {
   table: IconTable,
   board: IconBoard,
   calendar: IconCalendar,
+  mail: IconMail,
   tag: IconTag,
   settings: IconSliders,
 } as const;
@@ -51,6 +53,7 @@ export function AppShell({
   brands,
   settings,
   views,
+  mailPending,
   children,
 }: {
   stages: Stage[];
@@ -59,6 +62,8 @@ export function AppShell({
   settings: UserSettings;
   /** saved views, for the palette's "jump to view" */
   views: SavedViewSummary[];
+  /** pending mail requests, the 메일 의뢰 badge */
+  mailPending: number;
   children: React.ReactNode;
 }) {
   const router = useRouter();
@@ -122,6 +127,15 @@ export function AppShell({
             >
               <Icon className={`size-4 ${active ? 'text-accent' : ''}`} />
               {item.label}
+              {item.href === '/mail' && mailPending > 0 ? (
+                <span
+                  className="ml-auto inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-accent px-1.5 text-[11px] font-semibold text-accent-fg tabular-nums"
+                  aria-label={`대기 ${mailPending}건`}
+                  data-testid="mail-badge"
+                >
+                  {mailPending > 99 ? '99+' : mailPending}
+                </span>
+              ) : null}
             </Link>
           </li>
         );
@@ -183,12 +197,15 @@ export function AppShell({
           <header className="sticky top-0 z-30 flex h-12 items-center gap-1 border-b border-line bg-bg/95 px-2 backdrop-blur md:hidden">
             <button
               type="button"
-              className="btn btn-ghost px-2"
-              aria-label={menuOpen ? '메뉴 닫기' : '메뉴 열기'}
+              className="btn btn-ghost relative px-2"
+              aria-label={menuOpen ? '메뉴 닫기' : mailPending > 0 ? `메뉴 열기 (메일 의뢰 ${mailPending}건)` : '메뉴 열기'}
               aria-expanded={menuOpen}
               onClick={() => setMenuOpen((v) => !v)}
             >
               {menuOpen ? <IconX /> : <IconMenu />}
+              {!menuOpen && mailPending > 0 ? (
+                <span aria-hidden className="absolute top-1.5 right-1 size-1.5 rounded-full bg-accent" />
+              ) : null}
             </button>
             <Link href="/" className="flex items-center gap-1.5 text-[15px] font-bold tracking-tight">
               <span aria-hidden className="inline-block size-2 rounded-full bg-accent" />

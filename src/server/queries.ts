@@ -1,6 +1,7 @@
 import 'server-only';
 import { cache } from 'react';
 import { requireSession } from './auth/session';
+import { countPendingMail } from './db/mail';
 import { getSettings } from './db/settings';
 import { listStages } from './db/stages';
 import { getPool } from './db/pool';
@@ -18,4 +19,9 @@ export const loadViews = cache(async () => {
 export const loadStages = cache(async () => {
   await requireSession();
   return listStages(getPool());
+});
+/** Pending mail requests (sidebar badge, dashboard line). */
+export const loadMailPending = cache(async () => {
+  await requireSession();
+  return countPendingMail(getPool());
 });

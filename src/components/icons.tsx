@@ -52,7 +52,13 @@ export const IconTag = (p: IconProps) => (
     <circle cx="5.5" cy="5.5" r="1" />
   </Svg>
 );
-export const IconSliders = (p: IconProps) => (
+export const IconMail = (p: IconProps) => (
+  <Svg {...p}>
+    <rect x="2" y="3.5" width="12" height="9" rx="1.5" />
+    <path d="m2.5 4.5 5.5 4.5 5.5-4.5" />
+  </Svg>
+);
+export const IconSliders =(p: IconProps) => (
   <Svg {...p}>
     <path d="M3 4h10M3 8h10M3 12h10" />
     <circle cx="6" cy="4" r="1.3" fill="var(--bg)" />

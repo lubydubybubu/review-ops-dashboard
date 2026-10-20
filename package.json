@@ -13,6 +13,7 @@
     "db:seed": "tsx scripts/seed.ts",
     "hash-password": "tsx scripts/hash-password.ts",
     "auth:revoke-all": "tsx scripts/revoke-sessions.ts",
+    "ingest-token": "tsx scripts/ingest-token.ts",
     "test": "vitest run",
     "test:unit": "vitest run --project unit",
     "test:integration": "vitest run --project integration",

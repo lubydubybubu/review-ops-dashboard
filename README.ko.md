@@ -40,6 +40,11 @@ Review Ops는 리뷰 하나를 레코드 하나로 두고 대시보드·표·보
 - **리뷰 상세**: 모든 필드, 단계 이력, 체크리스트, 마크다운 메모, 엠바고 경고
 - **빠른 만들기**(`C` 또는 날짜 클릭): 대여/제공/구매 템플릿이 단계·마감일·체크리스트를 채움
 - **명령 팔레트**(`Ctrl/⌘ K`): 리뷰로 이동, 저장된 보기로 이동, 새 리뷰, 날짜로 이동(`11/3`, `내일`, `+7`)
+- **메일 의뢰**: 다른 호스트의 읽기 전용 메일 작업(`mail-ingest/`)이 리뷰 의뢰로 보이는 메일을 후보로 보내면
+  사이드바(대기 건수 배지)와 대시보드에 표시. 보낸 사람·제목·추출된 브랜드/제품/입수 형태/마감·신뢰도·근거 문장·
+  검증된 메시지 id로 만든 Gmail 링크를 보고 `리뷰로 등록`(빠른 만들기가 채워진 채로 열리고 리뷰 생성과 후보 처리를 한
+  트랜잭션으로) · `기존 리뷰에 연결` · `무시`(7일 안에 되돌리기). 이미 등록된 스레드의 새 메일은 그 리뷰에 연결.
+  메일 내용은 항상 글자 그대로 표시
 - **브랜드**(삭제 대신 보관), **설정**(주 시작 요일, 주말, 24시간제, 테마, 단계, 템플릿). 라이트/다크, 390px 모바일
 
 ## 구조
@@ -59,6 +64,8 @@ flowchart LR
   DB[("PostgreSQL 17<br/>실행 역할: DML만")]
   Migrate["migrate 작업<br/>스키마 소유 역할"]
   Site["상위 사이트<br/>관리자 로그인 + 연동 계약"]
+  Producer["메일 작업 (다른 호스트, LAN)<br/>읽기 전용 메일함 → LLM → mail-ingest/"]
+  Ingest["POST /api/ingest/mail-candidates<br/>직접 Host → 피어 CIDR → 토큰 해시 → zod"]
 
   UI -->|HTTPS| Proxy --> Pages --> Data
   UI -->|Server Actions| Actions --> Data
@@ -66,11 +73,12 @@ flowchart LR
   Auth -->|"PKCE 연동 + 백채널"| Site
   Data --> DB
   Migrate -->|"릴리스마다 1회 DDL"| DB
+  Producer -->|"bearer 토큰, LAN 전용"| Ingest -->|"mail_candidates 행만"| Data
 ```
 
 데이터 모델(ER 다이어그램)은 [README.md](README.md#data-model)에 있습니다. 핵심 테이블은 `workflow_stages`,
 `brands`, `reviews`, `review_stage_history`, `review_checklist_items`, `templates`, `user_settings`,
-`auth_sessions`, `saved_views`(마이그레이션 007)입니다.
+`auth_sessions`, `saved_views`(마이그레이션 007), `mail_candidates`(마이그레이션 008)입니다.
 
 ## 설계 결정과 이유
 
@@ -98,6 +106,15 @@ flowchart LR
   zod 스키마로 검증한 뒤 정해진 속성·연산자 표로만 파라미터 바인딩 SQL을 만듭니다. 사용자 입력이 SQL 문자열이 되는
   일은 없습니다. 저장은 보기의 `version` 비교 후 쓰기이고, 저장 안 된 초안은 시작한 버전을 URL(`?base=`)에 고정해
   다른 탭의 더 새로운 설정을 덮어쓰지 않습니다. 그래도 실행할 수 없는 설정은 저장된 설정으로 돌아가고 안내를 띄웁니다.
+- **메일은 신뢰하지 않는 데이터, 후보는 제가 눌러야 리뷰가 됨**: 메일함은 다른 호스트에서 읽기 전용으로 읽고, LLM은
+  근거 문장을 그대로 인용해 필드만 뽑으며 메일을 지시가 아닌 데이터로 다룹니다. 수집 경로는 `mail_candidates` 행만 쓸
+  수 있고, 리뷰는 제가 `리뷰로 등록`을 눌러야 만들어집니다(리뷰 생성과 결정을 한 트랜잭션으로, 후보는 버전 비교 후
+  쓰기). 모든 문자열은 글자 그대로 표시하고, 링크는 16진수로 검증한 메시지 id로 만든 Gmail 주소 하나뿐입니다.
+- **수집은 LAN 직통으로만**: 본문을 읽기 전에 차례로 원래 `Host`가 `OPS_INGEST_ALLOWED_HOST`와 정확히 같고
+  `cf-connecting-ip`/`cf-ray` 헤더가 없어야 하며(그래서 터널을 거친 공개 호스트명은 올바른 토큰이 있어도 닿지 못함),
+  **TCP 피어** 주소가 `OPS_INGEST_ALLOWED_CIDRS` 안이어야 하고(`peer-address.mjs` 사전 로드가 기록, `X-Forwarded-For`는
+  안 봄), bearer 토큰을 저장된 SHA-256과 상수 시간으로 비교합니다(서버는 토큰을 갖지 않음). 그다음 속도 제한과 길이
+  제한이 있는 zod 스키마. 설정이 비어 있으면 모두 거부합니다. 토큰은 세션이 아니고 다른 것은 열지 못합니다.
 - **KST 날짜 처리**: 날짜만 있는 값은 서울 기준 `date`, 시각은 `timestamptz`(UTC). 한국은 서머타임이 없어
   +09:00 고정으로 계산합니다. 지연은 마감일 KST 23:59:59가 지나야 시작합니다.
 - **소프트 삭제**: 브랜드·리뷰·단계·템플릿은 `archived_at`으로 보관만 합니다.
@@ -122,11 +139,12 @@ npm run lint && npm run typecheck
 npm run test:unit
 npm run test:integration     # 실제 PostgreSQL, 매번 새 DB, 마이그레이션 0부터, DML 전용 역할로 접속
 npm run build && npm run test:e2e
+python3 mail-ingest/test_post_candidates.py   # 메일 전송 스크립트(표준 라이브러리, 루프백 가짜 엔드포인트)
 ```
 
 통합·E2E 테스트는 **버려도 되는** 서버의 `TEST_DATABASE_URL`만 씁니다(루프백 55433 포트가 아니면 거부, 자기가
-만든 DB만 지움). CI는 lint, typecheck, 단위, 빌드, `postgres:17` 서비스 컨테이너로 통합 테스트, 러너의 Chrome으로
-브라우저 E2E, gitleaks를 돌립니다.
+만든 DB만 지움). CI는 lint, typecheck, 단위, 메일 전송 스크립트 테스트, 빌드, `postgres:17` 서비스 컨테이너로 통합
+테스트, 러너의 Chrome으로 브라우저 E2E(메일 의뢰 흐름 포함), gitleaks를 돌립니다.
 
 ## 로드맵
 
@@ -142,6 +160,8 @@ npm run build && npm run test:e2e
 - 운영 로그인은 연동 계약을 구현한 상위 사이트가 있어야 합니다. 없으면 로컬 `demo-password` 모드만 됩니다.
 - 컨테이너 이미지는 Dockerfile·Compose로 정의만 했고 이 저장소 CI에서는 빌드하지 않습니다.
 - 발행된 글 자동 동기화는 아직 없습니다.
+- 메일 추출 단계(메일함 읽기 + LLM)는 이 저장소에 없습니다. `mail-ingest/`는 전송만 맡고, 추출 정확도는 여기서
+  측정하지 않았습니다.
 - UI는 한국어만 있습니다.
 
 ## 제 역할

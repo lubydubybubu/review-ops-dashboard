@@ -2,7 +2,8 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { getAuthConfig, sessionCookieName } from './server/auth/config';
 import { TOKEN_RE } from './server/auth/handoff';
 
-const PUBLIC_PATHS = new Set(['/login', '/auth/start', '/auth/callback', '/api/health']);
+// /api/ingest/mail-candidates checks its own bearer token (machine-to-machine; it never grants a session).
+const PUBLIC_PATHS = new Set(['/login', '/auth/start', '/auth/callback', '/api/health', '/api/ingest/mail-candidates']);
 
 /**
  * Optimistic pre-filter only: no well-formed session cookie → /login. The real check

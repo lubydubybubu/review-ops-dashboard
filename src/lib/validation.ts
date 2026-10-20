@@ -141,6 +141,35 @@ export const checklistAddSchema = z.object({
 });
 export const checklistToggleSchema = z.object({ itemId: id, done: z.boolean() });
 
+// ---------------------------------------------------------------- mail requests
+
+/** A decision on a mail candidate is checked against the `version` the inbox showed. */
+export const mailDecisionSchema = z.object({ id, expectedVersion: z.number().int().positive() });
+
+/**
+ * 리뷰로 등록: the quick-create form opened from a mail candidate. The stage is not a field: the server
+ * always uses the 받음 (to-do) intake stage. Either an existing brand or a new brand name, not both.
+ */
+export const mailAcceptSchema = z
+  .object({
+    productName,
+    brandId: optionalId,
+    newBrandName: optionalText(120),
+    sourceType,
+    templateId: optionalId,
+    writeDueOn: optionalDate,
+    publishPlannedOn: optionalDate,
+    embargoUntil: optionalDate,
+    memo: z.string().max(2000, '2000자 이하로 입력해 주세요.').default(''),
+  })
+  .refine((v) => v.brandId === null || v.newBrandName === null, {
+    message: '기존 브랜드와 새 브랜드 중 하나만 고를 수 있습니다.',
+    path: ['brandId'],
+  });
+export type MailAcceptInput = z.infer<typeof mailAcceptSchema>;
+
+export const mailLinkSchema = mailDecisionSchema.extend({ reviewId: id });
+
 // ---------------------------------------------------------------- brands
 
 export const BRAND_STATUSES = ['prospect', 'active', 'paused'] as const;

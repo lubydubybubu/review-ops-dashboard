@@ -86,55 +86,71 @@ const FROM = `from reviews r ${JOINS}`;
  * stage, fills missing dates along its offset chain and copies its checklist.
  */
 export async function createReview(db: Database, input: ReviewCreateInput): Promise<number> {
-  return withTransaction(db, async (tx) => {
-    const template = input.templateId !== null ? await getTemplate(tx, input.templateId) : undefined;
-    if (input.templateId !== null && !template) throw new NotFoundError('template');
+  return withTransaction(db, (tx) => createReviewInTx(tx, input));
+}
 
-    const anchored: Partial<ReviewDates> = {};
-    if (input.anchorField && input.anchorDate) {
-      const key = ({
-        received: 'receivedOn',
-        shoot: 'shootOn',
-        write_due: 'writeDueOn',
-        publish_planned: 'publishPlannedOn',
-      } as const)[input.anchorField];
-      anchored[key] = input.anchorDate;
-    }
-    const dates = template
+/** What a caller other than quick create may fix up front (a mail request states its own dates). */
+export interface ReviewCreateExtras {
+  /** exact dates: no template offsets are applied when given */
+  dates?: ReviewDates & { embargoUntil: IsoDate | null };
+  /** appended to the template body */
+  notesMd?: string;
+}
+
+/** createReview inside an existing transaction (the mail accept writes review + candidate together). */
+export async function createReviewInTx(tx: Queryable, input: ReviewCreateInput, extras: ReviewCreateExtras = {}): Promise<number> {
+  const template = input.templateId !== null ? await getTemplate(tx, input.templateId) : undefined;
+  if (input.templateId !== null && !template) throw new NotFoundError('template');
+
+  const anchored: Partial<ReviewDates> = {};
+  if (input.anchorField && input.anchorDate) {
+    const key = ({
+      received: 'receivedOn',
+      shoot: 'shootOn',
+      write_due: 'writeDueOn',
+      publish_planned: 'publishPlannedOn',
+    } as const)[input.anchorField];
+    anchored[key] = input.anchorDate;
+  }
+  const dates =
+    extras.dates ??
+    (template
       ? applyTemplateOffsets(anchored, template)
-      : applyTemplateOffsets(anchored, { shootOffsetDays: null, writeOffsetDays: null, publishOffsetDays: null });
+      : applyTemplateOffsets(anchored, { shootOffsetDays: null, writeOffsetDays: null, publishOffsetDays: null }));
 
-    const stageId = input.stageId ?? template?.initialStageId ?? (await getDefaultStage(tx)).id;
+  const stageId = input.stageId ?? template?.initialStageId ?? (await getDefaultStage(tx)).id;
+  const body = template?.bodyMd ?? '';
+  const notes = extras.notesMd ? [body, extras.notesMd].filter((s) => s.trim() !== '').join('\n\n') : body;
 
-    const { rows } = await tx.query<{ id: number }>(
-      `insert into reviews (product_name, brand_id, source_type, stage_id, received_on, shoot_on,
-                            write_due_on, publish_planned_on, template_id, notes_md)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-       returning id`,
-      [
-        input.productName,
-        input.brandId,
-        input.sourceType ?? template?.sourceType ?? null,
-        stageId,
-        dates.receivedOn,
-        dates.shootOn,
-        dates.writeDueOn,
-        dates.publishPlannedOn,
-        template?.id ?? null,
-        template?.bodyMd ?? '',
-      ],
+  const { rows } = await tx.query<{ id: number }>(
+    `insert into reviews (product_name, brand_id, source_type, stage_id, received_on, shoot_on,
+                          write_due_on, publish_planned_on, embargo_until, template_id, notes_md)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+     returning id`,
+    [
+      input.productName,
+      input.brandId,
+      input.sourceType ?? template?.sourceType ?? null,
+      stageId,
+      dates.receivedOn,
+      dates.shootOn,
+      dates.writeDueOn,
+      dates.publishPlannedOn,
+      extras.dates?.embargoUntil ?? null,
+      template?.id ?? null,
+      notes,
+    ],
+  );
+  const id = rows[0]!.id;
+
+  if (template) {
+    await tx.query(
+      `insert into review_checklist_items (review_id, title, sort)
+       select $1, title, sort from template_checklist_items where template_id = $2`,
+      [id, template.id],
     );
-    const id = rows[0]!.id;
-
-    if (template) {
-      await tx.query(
-        `insert into review_checklist_items (review_id, title, sort)
-         select $1, title, sort from template_checklist_items where template_id = $2`,
-        [id, template.id],
-      );
-    }
-    return id;
-  });
+  }
+  return id;
 }
 
 // ---------------------------------------------------------------- read

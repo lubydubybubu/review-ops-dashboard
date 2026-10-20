@@ -29,9 +29,21 @@ services:
       DATABASE_URL_FILE: /run/secrets/ops_app_database_url
       # Only set when the reverse proxy in front really sets it (e.g. x-real-ip).
       OPS_TRUSTED_CLIENT_IP_HEADER: ${OPS_TRUSTED_CLIENT_IP_HEADER:-}
-    secrets: [site_client_secret, ops_app_database_url]
-    # Host loopback only: the reverse proxy on this host is the sole way in.
-    ports: ["127.0.0.1:3000:3000"]
+      # Mail-request ingest (docs/DEPLOYMENT.md "Mail ingest"): SHA-256 of the producer's token, never the token.
+      # The file must exist (compose refuses a missing secret file); an EMPTY file keeps ingest off (every POST → 401).
+      OPS_INGEST_TOKEN_SHA256_FILE: /run/secrets/ops_ingest_token_sha256
+      # Socket peer addresses allowed to POST (the producer host). Checked against the TCP peer, not headers.
+      OPS_INGEST_ALLOWED_CIDRS: ${OPS_INGEST_ALLOWED_CIDRS:-}
+      # REQUIRED for ingest: the exact Host the producer sends, i.e. OPS_INGEST_PUBLISH's host:port. Requests with
+      # another Host (the public hostname) or any Cloudflare header are refused before the token is looked at.
+      # Empty = every ingest POST → 401 (fail closed). Not `:?`-required here, so the app still starts with ingest off.
+      OPS_INGEST_ALLOWED_HOST: ${OPS_INGEST_ALLOWED_HOST:-}
+      OPS_INGEST_RATE_PER_MINUTE: ${OPS_INGEST_RATE_PER_MINUTE:-60}
+    secrets: [site_client_secret, ops_app_database_url, ops_ingest_token_sha256]
+    # Host loopback: the reverse proxy on this host is the way in for browsers.
+    # OPS_INGEST_PUBLISH optionally publishes the same app on the host's LAN address for the mail producer
+    # (e.g. 192.0.2.20:3100); it defaults to a second loopback port, i.e. nothing new is reachable.
+    ports: ["127.0.0.1:3000:3000", "${OPS_INGEST_PUBLISH:-127.0.0.1:3100}:3000"]
     mem_limit: 768m
     pids_limit: 256
     healthcheck:
@@ -61,3 +73,5 @@ secrets:
     file: ./secrets/ops_app_database_url
   ops_owner_database_url:
     file: ./secrets/ops_owner_database_url
+  ops_ingest_token_sha256:
+    file: ./secrets/ops_ingest_token_sha256

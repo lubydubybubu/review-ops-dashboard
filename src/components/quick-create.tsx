@@ -6,6 +6,7 @@ import { applyTemplateOffsets, type TemplateOffsets } from '@/lib/domain/templat
 import { ANCHOR_FIELD_LABEL, ANCHOR_FIELDS, SOURCE_TYPE_LABEL, type AnchorField } from '@/lib/domain/review';
 import { createReviewAction } from '@/server/actions/reviews';
 import { Dialog } from './dialog';
+import { MailCreateForm } from './mail-create-form';
 import { OPS_EVENTS, useShell, type QuickCreatePrefill } from './shell-context';
 import { useToast } from './toast';
 
@@ -28,9 +29,9 @@ export function QuickCreateDialog({
   onClose: () => void;
 }) {
   return (
-    <Dialog open={open} onClose={onClose} label="새 리뷰">
+    <Dialog open={open} onClose={onClose} label={prefill.mail ? '메일 의뢰를 리뷰로 등록' : '새 리뷰'}>
       {/* the dialog unmounts its content when closed, so each opening starts from the prefill */}
-      <QuickCreateForm prefill={prefill} onClose={onClose} />
+      {prefill.mail ? <MailCreateForm prefill={prefill.mail} onClose={onClose} /> : <QuickCreateForm prefill={prefill} onClose={onClose} />}
     </Dialog>
   );
 }

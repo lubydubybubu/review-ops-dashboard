@@ -47,6 +47,12 @@ and calendar.
   stage, deadline offsets and checklist.
 - **Command palette** (`Ctrl/⌘ K`): jump to a review, create one, jump to a saved view, go to a date (`11/3`, `내일`,
   `+7`).
+- **Mail requests (메일 의뢰)**: a read-only mail job on another host (`mail-ingest/`) POSTs review-request
+  candidates; they appear in an inbox (sidebar badge, dashboard) with sender, subject, extracted brand /
+  product / source / deadlines, confidence, quoted evidence lines and a Gmail link built from a validated
+  message id. 리뷰로 등록 opens a prefilled quick create and stores the review and the candidate decision in one
+  transaction; 기존 리뷰에 연결 links it; 무시 dismisses it with a 7-day undo. New mail in a thread that is
+  already registered links to that review. Mail text is always rendered as plain text.
 - **Brands** (archive instead of delete) and **settings** (week start, weekends, 24h clock, theme, stages,
   templates). Light/dark, works at 390 px, Korean UI.
 
@@ -67,6 +73,8 @@ flowchart LR
   DB[("PostgreSQL 17<br/>runtime role: DML only")]
   Migrate["migrate job<br/>schema owner role"]
   Site["Parent site<br/>admin login + handoff contract"]
+  Producer["Mail producer (other host, LAN)<br/>read-only mailbox → LLM → mail-ingest/"]
+  Ingest["POST /api/ingest/mail-candidates<br/>direct Host → peer CIDR → token hash → zod"]
 
   UI -->|HTTPS| Proxy --> Pages --> Data
   UI -->|Server Actions| Actions --> Data
@@ -74,6 +82,7 @@ flowchart LR
   Auth -->|"PKCE handoff + back channel"| Site
   Data --> DB
   Migrate -->|"DDL, once per release"| DB
+  Producer -->|"bearer token, LAN only"| Ingest -->|"mail_candidates rows only"| Data
 ```
 
 Code layout:
@@ -87,7 +96,10 @@ src/server/db/view-sql.ts view config → parameterized SQL from closed property
 src/server/db/*           typed data layer: parameterized SQL only
 src/server/actions/*      'use server': session → Origin → zod → data layer → typed result
 src/server/auth/*         server-side sessions, handoff client (PKCE, back channel), rate limits
-src/app/(app)/*           pages: dashboard, reviews, reviews/[id], board, calendar, brands, settings
+src/app/api/ingest/*      mail-candidate ingest; gates and schema in src/server/ingest/*
+scripts/peer-address.mjs  `node --import` preload that stamps each request with its TCP peer address
+mail-ingest/              stdlib Python producer (post_candidates.py) + its tests
+src/app/(app)/*           pages: dashboard, reviews, reviews/[id], board, calendar, mail, brands, settings
 tests/unit, tests/integration, e2e/run.ts
 ```
 
@@ -104,6 +116,7 @@ erDiagram
   templates |o--o{ reviews : "created from"
   reviews ||--o{ review_stage_history : "stage changes"
   reviews ||--o{ review_checklist_items : "checklist"
+  reviews |o--o{ mail_candidates : "registered / linked as"
 
   workflow_stages {
     bigint id PK
@@ -167,9 +180,26 @@ erDiagram
     jsonb config "validated filter / sort / group"
     int version "compare-and-set token"
   }
+  mail_candidates {
+    bigint id PK
+    text source "gmail"
+    text message_id "hex, unique per source"
+    text thread_id "hex"
+    text from_address
+    text subject
+    jsonb extracted "brand / product / source / deadlines"
+    jsonb evidence "quoted lines"
+    real confidence
+    text status "pending | accepted | dismissed | duplicate"
+    bigint review_id FK
+    timestamptz decided_at
+    int version "compare-and-set token"
+  }
 ```
 
 `saved_views` (migration 007) references nothing; its `config` is only ever written after zod validation.
+`mail_candidates` (migration 008) ties `status` to `review_id` / `decided_at` with a CHECK, references reviews
+`on delete restrict`, and serializes ingest and decisions per thread with a transaction-scoped advisory lock.
 
 Plus `user_settings` (single row), `auth_login_attempts`, `auth_sessions` and the runner's
 `schema_migrations` ledger (filename, checksum, applied_at).
@@ -208,6 +238,18 @@ Plus `user_settings` (single row), `auth_login_attempts`, `auth_sessions` and th
   is compare-and-set on the view's `version`; an unsaved draft pins the version it started from (`?base=` in
   the URL), so saving never overwrites newer settings from another tab. A config that still cannot run falls
   back to the saved settings with an inline notice.
+- **Mail is untrusted data, and a candidate is never a review until I click.** The mailbox is read
+  read-only on another host; an LLM extracts fields with quoted evidence lines and is told to treat the mail
+  as data, not instructions. The ingest route can write only `mail_candidates` rows; reviews are created by
+  my own 리뷰로 등록 click (review + decision in one transaction, compare-and-set on the candidate). Every
+  string is rendered as plain text, and the only link is a Gmail URL built from a hex-validated message id.
+- **Ingest is reachable only LAN-direct.** In order, before the body is parsed: the raw `Host` must equal
+  `OPS_INGEST_ALLOWED_HOST` exactly and no `cf-connecting-ip` / `cf-ray` header may be present (so the public
+  hostname through a tunnel never reaches it, even with a valid token); the **TCP peer** address must be in
+  `OPS_INGEST_ALLOWED_CIDRS` (stamped by the `peer-address.mjs` preload, never taken from `X-Forwarded-For`);
+  the bearer token is compared against its stored SHA-256 in constant time (the server never holds the
+  token); then a rate limit and a capped zod schema. Unset configuration fails closed. The token is not a
+  session and opens nothing else.
 - **KST date handling.** Date-only fields are `date` values meaning a Seoul calendar day; instants are
   `timestamptz` (UTC). Korea has no DST, so the offset is a fixed +09:00 and day arithmetic is done in UTC
   without drift. "Overdue" starts after 23:59:59 KST of the due day. FullCalendar runs in UTC mode with KST
@@ -252,10 +294,16 @@ Integration and E2E use `TEST_DATABASE_URL`, the superuser URL of a **throw-away
 refuses anything that is not loopback on port 55433 (override with `TEST_DB_ALLOWED_PORT`) and drops only
 databases it generated itself. E2E needs `CHROME_PATH` (default `/usr/bin/google-chrome`) and `openssl`; it
 runs `next start` behind a local TLS proxy on RFC 6761 `.test` hostnames against the synthetic parent site and
-checks sign-in, replay/CSRF refusal, revocation, board/calendar drag, quick edit, palette and shortcuts.
+checks sign-in, replay/CSRF refusal, revocation, board/calendar drag, quick edit, palette and shortcuts, and
+the mail-request flow (ingest gates, the `mail-ingest/` producer against the running app, inbox decisions).
+
+```bash
+python3 mail-ingest/test_post_candidates.py   # producer: loopback fake endpoint, stdlib only
+```
 
 CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs lint, typecheck, unit, build, integration
-against a `postgres:17` service container, the browser E2E with the runner's Chrome, and gitleaks.
+against a `postgres:17` service container, the producer's Python tests, the browser E2E with the runner's
+Chrome, and gitleaks.
 
 ## Roadmap
 
@@ -274,6 +322,8 @@ against a `postgres:17` service container, the browser E2E with the runner's Chr
   local `demo-password` mode works (not for production).
 - The container image is described (Dockerfile, Compose) but not built or run in this repository's CI.
 - No post sync from the published site yet; publish dates are entered by hand.
+- The mail extraction step (mailbox read + LLM) is not in this repository; `mail-ingest/` is only the
+  transport, and extraction quality is not measured here.
 - Korean-only UI.
 
 ## My role

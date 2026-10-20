@@ -11,7 +11,7 @@ import { requireSession } from '@/server/auth/session';
 import { listCalendarChips } from '@/server/db/calendar';
 import { countReviewsByStage, listOverdueReviews } from '@/server/db/dashboard';
 import { getPool } from '@/server/db/pool';
-import { loadSettings, loadStages } from '@/server/queries';
+import { loadMailPending, loadSettings, loadStages } from '@/server/queries';
 
 export const metadata: Metadata = { title: '대시보드' };
 
@@ -21,11 +21,12 @@ export default async function DashboardPage() {
   const today = todayInSeoul();
   const settings = await loadSettings();
   const week = weekRange(today, settings.weekStart);
-  const [stages, overdue, counts, chips] = await Promise.all([
+  const [stages, overdue, counts, chips, mailPending] = await Promise.all([
     loadStages(),
     listOverdueReviews(db, today),
     countReviewsByStage(db),
     listCalendarChips(db, { from: week.start, to: week.end, fields: settings.calendarFields }, today),
+    loadMailPending(),
   ]);
 
   const countByStage = new Map(counts.map((c) => [c.stageId, c.count]));
@@ -42,6 +43,18 @@ export default async function DashboardPage() {
   return (
     <>
       <PageHeader title="대시보드" meta={formatDateKo(today)} actions={<NewReviewButton />} />
+
+      {mailPending > 0 ? (
+        <Link
+          href="/mail"
+          data-testid="dashboard-mail"
+          className="-mt-3 mb-5 inline-flex items-center gap-1.5 text-[13px] text-muted hover:text-fg"
+        >
+          <Dot color="var(--accent)" className="size-1.5" />
+          메일 의뢰 <span className="font-semibold text-fg tabular-nums">{mailPending}건</span>
+          <span className="text-subtle">· 확인하기</span>
+        </Link>
+      ) : null}
 
       <dl className="mb-10 grid grid-cols-3 divide-x divide-line border-y border-line">
         <Stat label="지연" value={overdue.length} danger={overdue.length > 0} />
