@@ -16,9 +16,8 @@ split of roles, so that no single agent both writes and approves a change.
   endpoint, container/Compose/DB bootstrap artifacts and runbook (docs/DEPLOYMENT.md), widget API
   contract draft (docs/WIDGET-API.md).
 - Verified by this repository's CI on every push: lint, typecheck, unit tests, integration tests against
-  a throw-away PostgreSQL 17 service (DML-only role), production build, secret scan.
-- Browser E2E (`npm run test:e2e`) runs locally with a system Chrome and `openssl` against the
-  **synthetic** parent-site fixture; it is not part of CI here.
+  a throw-away PostgreSQL 17 service (DML-only role), production build, browser E2E (the runner's
+  Chrome + `openssl`, against the **synthetic** parent-site fixture), secret scan.
 - Not in this repository: the parent site's implementation of the handoff contract, a native widget, and
   one-way sync of published posts from the parent site (planned: idempotent upsert keyed by the site's
   post id, never overwriting fields edited in Ops, never auto-publishing or deleting).
